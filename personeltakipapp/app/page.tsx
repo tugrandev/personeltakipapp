@@ -1,120 +1,155 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
-import { LogOut, ShieldCheck, QrCode } from 'lucide-react';
+import Link from 'next/link';
+import { ShieldCheck, Loader2, Lock, Mail } from 'lucide-react';
+import { supabase } from '@/lib/supabase';
 
-export default function HomePage() {
-  const [user, setUser] = useState<any>(null);
-  const [profile, setProfile] = useState<any>(null);
-  const [recentLogs, setRecentLogs] = useState<any[]>([]);
+async function getRole(userId: string) {
+  const { data } = await supabase.from('profiles').select('role').eq('id', userId).single();
+  return data?.role as string | undefined;
+}
+
+export default function AdminLoginPage() {
   const router = useRouter();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [checking, setChecking] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    checkUser();
-  }, []);
+    let active = true;
+    supabase.auth.getUser().then(async ({ data: { user } }) => {
+      if (!active) return;
+      if (!user) return setChecking(false);
+      const role = await getRole(user.id);
+      router.replace(role === 'admin' ? '/admin' : '/personel');
+    });
+    return () => {
+      active = false;
+    };
+  }, [router]);
 
-  const checkUser = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) {
-      router.push('/login');
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+
+    const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password });
+    if (authError || !data.user) {
+      setError('E-posta veya şifre hatalı.');
+      setLoading(false);
       return;
     }
-    setUser(user);
 
-    const { data: prof } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', user.id)
-      .single();
-    setProfile(prof);
+    const role = await getRole(data.user.id);
+    if (role !== 'admin') {
+      await supabase.auth.signOut();
+      setError('Bu alan yalnızca yöneticiler içindir.');
+      setLoading(false);
+      return;
+    }
 
-    const { data } = await supabase
-      .from('attendance_logs')
-      .select('*, locations(name)')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false })
-      .limit(15);
-    if (data) setRecentLogs(data);
+    router.replace('/admin');
   };
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-    router.push('/login');
-  };
+  if (checking) {
+    return (
+      <main className="min-h-screen flex items-center justify-center bg-slate-950">
+        <Loader2 className="w-8 h-8 animate-spin text-emerald-500" aria-label="Yükleniyor" />
+      </main>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center p-4">
-      <div className="w-full max-w-md flex items-center justify-between py-3 border-b border-slate-800 mb-6">
-        <div>
-          <p className="text-xs text-slate-400">Personel Takip</p>
-          <h2 className="font-semibold text-base">{profile?.full_name || user?.email}</h2>
+    <main className="min-h-screen grid lg:grid-cols-2 bg-slate-950 text-white">
+      <section className="hidden lg:flex flex-col justify-between p-12 bg-gradient-to-br from-emerald-950 via-slate-950 to-slate-950 border-r border-slate-800">
+        <div className="flex items-center gap-2 text-emerald-400 font-semibold">
+          <ShieldCheck className="w-6 h-6" />
+          Personel Takip
         </div>
-        <div className="flex items-center gap-2">
-          {profile?.role === 'admin' && (
-            <button
-              onClick={() => router.push('/admin')}
-              className="flex items-center gap-1 text-xs bg-indigo-600 hover:bg-indigo-500 px-3 py-2 rounded-lg font-medium"
-            >
-              <ShieldCheck className="w-4 h-4" /> Yönetim
-            </button>
+        <div className="max-w-md">
+          <h2 className="text-4xl font-bold leading-tight text-balance">
+            Ekibinizin giriş-çıkış hareketlerini tek ekrandan yönetin.
+          </h2>
+          <p className="mt-4 text-slate-400 leading-relaxed">
+            QR ve konum doğrulamalı kayıtlar, günlük puantaj özetleri ve anlık içerideki personel listesi.
+          </p>
+        </div>
+        <p className="text-xs text-slate-500">© {new Date().getFullYear()} Personel Takip Sistemi</p>
+      </section>
+
+      <section className="flex items-center justify-center p-6">
+        <div className="w-full max-w-sm">
+          <div className="flex items-center gap-3 mb-8">
+            <div className="w-11 h-11 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center">
+              <ShieldCheck className="w-6 h-6 text-emerald-400" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold">Yönetici Girişi</h1>
+              <p className="text-sm text-slate-400">Yönetim paneline erişmek için giriş yapın</p>
+            </div>
+          </div>
+
+          {error && (
+            <div role="alert" className="bg-red-500/10 border border-red-500/40 text-red-300 text-sm p-3 rounded-lg mb-4">
+              {error}
+            </div>
           )}
-          <button
-            onClick={handleLogout}
-            className="p-2 text-slate-400 hover:text-white bg-slate-900 rounded-lg border border-slate-800"
-            title="Çıkış Yap"
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
 
-      <div className="w-full max-w-md bg-slate-900/70 border border-slate-800 rounded-2xl p-4 mb-6 flex items-center gap-3 text-sm text-slate-300">
-        <QrCode className="w-8 h-8 text-emerald-400 shrink-0" />
-        <p>Giriş veya çıkış yapmak için telefonunuzun kamerasını açıp kapıdaki QR kodu okutmanız yeterlidir.</p>
-      </div>
-
-      <div className="w-full max-w-md">
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">
-          Son Hareketleriniz
-        </h3>
-        <div className="space-y-2">
-          {recentLogs.length === 0 ? (
-            <p className="text-sm text-slate-500 bg-slate-900/50 p-4 rounded-xl border border-slate-800/60">
-              Henüz giriş-çıkış kaydınız bulunmuyor.
-            </p>
-          ) : (
-            recentLogs.map((log) => (
-              <div
-                key={log.id}
-                className="flex items-center justify-between bg-slate-900 border border-slate-800 px-4 py-3 rounded-xl text-sm"
-              >
-                <div>
-                  <span
-                    className={`inline-block px-2 py-0.5 rounded text-xs font-bold mr-2 ${
-                      log.action_type === 'IN'
-                        ? 'bg-emerald-500/20 text-emerald-400'
-                        : 'bg-amber-500/20 text-amber-400'
-                    }`}
-                  >
-                    {log.action_type === 'IN' ? 'GİRİŞ' : 'ÇIKIŞ'}
-                  </span>
-                  <span className="text-slate-200">{log.locations?.name}</span>
-                </div>
-                <span className="text-xs text-slate-400">
-                  {new Date(log.created_at).toLocaleString('tr-TR', {
-                    day: '2-digit',
-                    month: '2-digit',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}
-                </span>
+          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+            <div>
+              <label htmlFor="email" className="block text-sm text-slate-300 mb-1.5">E-posta</label>
+              <div className="relative">
+                <Mail className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  id="email"
+                  type="email"
+                  required
+                  autoComplete="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="yonetici@sirket.com"
+                  className="w-full pl-9 pr-3 py-2.5 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500"
+                />
               </div>
-            ))
-          )}
+            </div>
+            <div>
+              <label htmlFor="password" className="block text-sm text-slate-300 mb-1.5">Şifre</label>
+              <div className="relative">
+                <Lock className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  id="password"
+                  type="password"
+                  required
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full pl-9 pr-3 py-2.5 bg-slate-900 border border-slate-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500"
+                />
+              </div>
+            </div>
+            <button
+              type="submit"
+              disabled={loading}
+              className="mt-2 w-full py-3 bg-emerald-600 hover:bg-emerald-500 font-semibold rounded-lg transition disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+              {loading ? 'Doğrulanıyor...' : 'Giriş Yap'}
+            </button>
+          </form>
+
+          <p className="mt-8 text-center text-sm text-slate-500">
+            Personel misiniz?{' '}
+            <Link href="/login?redirect=/personel" className="text-emerald-400 hover:underline">
+              Personel girişi
+            </Link>
+          </p>
         </div>
-      </div>
-    </div>
+      </section>
+    </main>
   );
 }
