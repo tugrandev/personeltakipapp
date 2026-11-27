@@ -27,13 +27,18 @@ function ScanProcessor() {
       }
       navigator.geolocation.getCurrentPosition(resolve, reject, {
         enableHighAccuracy: true,
-        timeout: 12000,
+        timeout: 15000,
         maximumAge: 0,
       });
     });
   };
 
   const processScan = async () => {
+    // Tekrar dene butonuna basıldığında ekranı sıfırla
+    setStatus('loading');
+    setTitle('Konum ve QR doğrulanıyor...');
+    setDetail('Lütfen konum izni istendiğinde onay verin.');
+
     if (!locSecret) {
       setStatus('error');
       setTitle('Geçersiz QR Bağlantısı');
@@ -87,7 +92,6 @@ function ScanProcessor() {
         return;
       }
 
-      // Son 16 saat içindeki en son harekete bak (Gece vardiyasını ve unutulan çıkışları doğru yönetir)
       const sixteenHoursAgo = new Date(Date.now() - 16 * 60 * 60 * 1000).toISOString();
 
       const { data: recentLogs } = await supabase
@@ -159,7 +163,8 @@ function ScanProcessor() {
           <h1 className="text-2xl font-bold text-red-400">{title}</h1>
           <p className="text-sm text-slate-300">{detail}</p>
           <button
-            onClick={processScan}
+            type="button"
+            onClick={() => processScan()}
             className="mt-4 w-full py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm font-semibold"
           >
             Tekrar Dene
