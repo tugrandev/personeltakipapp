@@ -16,11 +16,27 @@ import {
   AlertCircle,
   Trash2,
   LogOut,
+  MapPin,
+  Clock,
 } from 'lucide-react';
+
+interface ActiveWorker {
+  userId: string;
+  fullName: string;
+  username: string;
+  checkInTime: string;
+  distanceMeters: number;
+}
+
+interface LocationBox {
+  id: string;
+  name: string;
+  activeWorkers: ActiveWorker[];
+}
 
 export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<'logs' | 'staff'>('logs');
-  const [logs, setLogs] = useState<any[]>([]);
+  const [locationBoxes, setLocationBoxes] = useState<LocationBox[]>([]);
   const [staffList, setStaffList] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
@@ -38,18 +54,63 @@ export default function AdminPage() {
       router.push('/login');
       return;
     }
-    Promise.all([fetchLogs(), fetchStaff()]);
+    Promise.all([fetchLiveLocations(), fetchStaff()]);
   }, []);
 
-  const fetchLogs = async () => {
+  const fetchLiveLocations = async () => {
     setLoading(true);
-    const { data } = await supabase
-      .from('attendance_logs')
-      .select('*, profiles(full_name), locations(name)')
-      .order('created_at', { ascending: false })
-      .limit(100);
 
-    if (data) setLogs(data);
+    // 1. Tüm şubeleri çek
+    const { data: locations } = await supabase
+      .from('locations')
+      .select('id, name')
+      .order('name', { ascending: true });
+
+    // 2. Bugünün başlangıcından itibaren tüm giriş/çıkış hareketlerini çek
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const { data: todayLogs } = await supabase
+      .from('attendance_logs')
+      .select('user_id, location_id, action_type, created_at, distance_meters, profiles(full_name, username)')
+      .gte('created_at', todayStart.toISOString())
+      .order('created_at', { ascending: false });
+
+    // 3. Her personelin bugünkü EN SON hareketini bul (sadece son hareketi 'IN' olanlar içeridedir)
+    const latestUserStatus = new Map<string, any>();
+    if (todayLogs) {
+      for (const log of todayLogs) {
+        if (!latestUserStatus.has(log.user_id)) {
+          latestUserStatus.set(log.user_id, log);
+        }
+      }
+    }
+
+    // 4. Şube kutularını oluştur ve içerideki personelleri ilgili şubeye yerleştir
+    const boxes: LocationBox[] = (locations || []).map((loc) => {
+      const workersInThisLoc: ActiveWorker[] = [];
+
+      latestUserStatus.forEach((log) => {
+        if (log.action_type === 'IN' && log.location_id === loc.id) {
+          const prof = Array.isArray(log.profiles) ? log.profiles[0] : log.profiles;
+          workersInThisLoc.push({
+            userId: log.user_id,
+            fullName: prof?.full_name || 'İsimsiz Personel',
+            username: prof?.username || '',
+            checkInTime: log.created_at,
+            distanceMeters: log.distance_meters,
+          });
+        }
+      });
+
+      return {
+        id: loc.id,
+        name: loc.name,
+        activeWorkers: workersInThisLoc,
+      };
+    });
+
+    setLocationBoxes(boxes);
     setLoading(false);
   };
 
@@ -119,15 +180,21 @@ export default function AdminPage() {
     fetchStaff();
   };
 
-  const exportCSV = () => {
-    const headers = ['Personel', 'Lokasyon', 'Islem', 'Tarih_Saat', 'Mesafe_Metre'];
-    const rows = logs.map((l) => [
-      l.profiles?.full_name || 'Bilinmiyor',
-      l.locations?.name || '',
-      l.action_type === 'IN' ? 'GIRIS' : 'CIKIS',
-      new Date(l.created_at).toLocaleString('tr-TR'),
-      l.distance_meters,
-    ]);
+  const exportLiveCSV = () => {
+    const headers = ['Sube_Lokasyon', 'Personel', 'Kullanici_Adi', 'Giris_Saati', 'Mesafe_Metre'];
+    const rows: any[] = [];
+
+    locationBoxes.forEach((box) => {
+      box.activeWorkers.forEach((w) => {
+        rows.push([
+          box.name,
+          w.fullName,
+          w.username,
+          new Date(w.checkInTime).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+          w.distanceMeters,
+        ]);
+      });
+    });
 
     const csvContent =
       'data:text/csv;charset=utf-8,\uFEFF' +
@@ -135,15 +202,18 @@ export default function AdminPage() {
 
     const link = document.createElement('a');
     link.setAttribute('href', encodeURI(csvContent));
-    link.setAttribute('download', `puantaj_${new Date().toISOString().slice(0, 10)}.csv`);
+    link.setAttribute('download', `aktif_personel_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
+  const totalActiveCount = locationBoxes.reduce((sum, box) => sum + box.activeWorkers.length, 0);
+
   return (
     <div className="min-h-screen bg-slate-950 text-white p-4 md:p-8">
-      <div className="max-w-5xl mx-auto">
+      <div className="max-w-6xl mx-auto">
+        {/* Üst Başlık & Sekmeler */}
         <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
           <div className="flex items-center gap-3">
             <button
@@ -155,7 +225,7 @@ export default function AdminPage() {
             </button>
             <div>
               <h1 className="text-xl font-bold">Yönetici Paneli</h1>
-              <p className="text-xs text-slate-400">Personel takibi ve kullanıcı yönetimi</p>
+              <p className="text-xs text-slate-400">Şube bazlı anlık personel durumu ve yönetim</p>
             </div>
           </div>
 
@@ -196,78 +266,102 @@ export default function AdminPage() {
           </div>
         </div>
 
+        {/* SEKME 1: LOKASYON BAZLI CANLI KUTULAR */}
         {activeTab === 'logs' && (
           <>
-            <div className="flex justify-end gap-2 mb-4">
-              <button
-                onClick={fetchLogs}
-                className="flex items-center gap-1.5 px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm hover:bg-slate-800"
-              >
-                <RefreshCw className="w-4 h-4" /> Yenile
-              </button>
-              <button
-                onClick={exportCSV}
-                className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium"
-              >
-                <Download className="w-4 h-4" /> Excel (CSV) İndir
-              </button>
-            </div>
-
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase">
-                    <tr>
-                      <th className="px-4 py-3">Personel</th>
-                      <th className="px-4 py-3">Şube / Lokasyon</th>
-                      <th className="px-4 py-3">İşlem</th>
-                      <th className="px-4 py-3">Tarih & Saat</th>
-                      <th className="px-4 py-3">Mesafe</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800">
-                    {loading ? (
-                      <tr>
-                        <td colSpan={5} className="px-4 py-8 text-center text-slate-400">
-                          Yükleniyor...
-                        </td>
-                      </tr>
-                    ) : logs.length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="px-4 py-8 text-center text-slate-400">
-                          Henüz kayıt yok.
-                        </td>
-                      </tr>
-                    ) : (
-                      logs.map((log) => (
-                        <tr key={log.id} className="hover:bg-slate-800/30">
-                          <td className="px-4 py-3 font-medium">{log.profiles?.full_name}</td>
-                          <td className="px-4 py-3 text-slate-300">{log.locations?.name}</td>
-                          <td className="px-4 py-3">
-                            <span
-                              className={`px-2 py-0.5 rounded text-xs font-bold ${
-                                log.action_type === 'IN'
-                                  ? 'bg-emerald-500/20 text-emerald-400'
-                                  : 'bg-amber-500/20 text-amber-400'
-                              }`}
-                            >
-                              {log.action_type === 'IN' ? 'GİRİŞ' : 'ÇIKIŞ'}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-slate-300">
-                            {new Date(log.created_at).toLocaleString('tr-TR')}
-                          </td>
-                          <td className="px-4 py-3 text-slate-400">{log.distance_meters} m</td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+              <div className="text-sm text-slate-300">
+                Şu an işyerlerinde aktif toplam personel:{' '}
+                <span className="font-bold text-emerald-400">{totalActiveCount} kişi</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={fetchLiveLocations}
+                  className="flex items-center gap-1.5 px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm hover:bg-slate-800"
+                >
+                  <RefreshCw className="w-4 h-4" /> Yenile
+                </button>
+                <button
+                  onClick={exportLiveCSV}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium"
+                >
+                  <Download className="w-4 h-4" /> Aktif Listeyi İndir
+                </button>
               </div>
             </div>
+
+            {loading ? (
+              <div className="text-center py-12 text-slate-400">Şube verileri yükleniyor...</div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                {locationBoxes.map((box) => (
+                  <div
+                    key={box.id}
+                    className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between shadow-lg"
+                  >
+                    <div>
+                      {/* Kutu Üst Başlık */}
+                      <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
+                        <div className="flex items-center gap-2.5">
+                          <div className="p-2 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-emerald-400">
+                            <MapPin className="w-5 h-5" />
+                          </div>
+                          <h2 className="font-bold text-base text-white">{box.name}</h2>
+                        </div>
+                        <span
+                          className={`px-2.5 py-1 rounded-full text-xs font-bold ${
+                            box.activeWorkers.length > 0
+                              ? 'bg-emerald-500/20 text-emerald-400'
+                              : 'bg-slate-800 text-slate-400'
+                          }`}
+                        >
+                          {box.activeWorkers.length} Çalışan
+                        </span>
+                      </div>
+
+                      {/* Kutu İçi Çalışan Listesi */}
+                      {box.activeWorkers.length === 0 ? (
+                        <div className="py-8 text-center text-sm text-slate-500 bg-slate-950/40 rounded-xl border border-slate-800/50">
+                          Şu an bu lokasyonda aktif çalışan bulunmuyor.
+                        </div>
+                      ) : (
+                        <ul className="space-y-2.5">
+                          {box.activeWorkers.map((worker) => (
+                            <li
+                              key={worker.userId}
+                              className="flex items-center justify-between bg-slate-800/50 border border-slate-700/60 px-3.5 py-2.5 rounded-xl"
+                            >
+                              <div className="flex items-center gap-2.5">
+                                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+                                <div>
+                                  <p className="text-sm font-semibold text-white">{worker.fullName}</p>
+                                  {worker.username && (
+                                    <p className="text-xs text-slate-400 font-mono">@{worker.username}</p>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-300 bg-emerald-500/10 px-2 py-1 rounded-md">
+                                  <Clock className="w-3 h-3" />
+                                  {new Date(worker.checkInTime).toLocaleTimeString('tr-TR', {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  })}
+                                </span>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </>
         )}
 
+        {/* SEKME 2: PERSONEL EKLEME & LİSTE */}
         {activeTab === 'staff' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 h-fit">
