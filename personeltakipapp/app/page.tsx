@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { getSessionUser, clearSessionUser, AppUser } from '@/lib/session';
 import { useRouter } from 'next/navigation';
-import { LogOut, ShieldCheck, QrCode, Camera, X, Clock, MapPin } from 'lucide-react';
+import { LogOut, QrCode, Camera, X, Clock, MapPin } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 
 export default function HomePage() {
@@ -23,17 +23,30 @@ export default function HomePage() {
       router.push('/login');
       return;
     }
+    if (currentUser.role === 'admin') {
+      router.push('/admin');
+      return;
+    }
+
     setUser(currentUser);
     fetchLogs(currentUser.id);
 
+    // Sayfaya geri dönüldüğünde veya sekme aktif olduğunda durumu tazele
+    const handleFocus = () => fetchLogs(currentUser.id);
+    window.addEventListener('focus', handleFocus);
+
     return () => {
+      window.removeEventListener('focus', handleFocus);
       stopScanner();
     };
   }, []);
 
   // Aktif vardiya varsa saniyelik kronometreyi çalıştır
   useEffect(() => {
-    if (!activeShift) return;
+    if (!activeShift) {
+      setElapsedText('');
+      return;
+    }
 
     const updateTimer = () => {
       const diffMs = Math.max(0, Date.now() - new Date(activeShift.checkInTime).getTime());
@@ -61,15 +74,17 @@ export default function HomePage() {
     if (data) {
       setRecentLogs(data);
 
-      // Son 16 saat içinde en son hareket 'IN' ise çalışan şu an içeridedir
-      if (data.length > 0 && data[0].action_type === 'IN') {
-        const sixteenHoursAgo = Date.now() - 16 * 60 * 60 * 1000;
-        if (new Date(data[0].created_at).getTime() >= sixteenHoursAgo) {
-          setActiveShift({
-            locationName: data[0].locations?.name || 'Şube',
-            checkInTime: data[0].created_at,
-          });
-        }
+      // En son hareket 'IN' ise ve 16 saatten yeniyse aktif vardiyayı göster, aksi halde kesinlikle kapat
+      const latest = data[0];
+      const sixteenHoursAgo = Date.now() - 16 * 60 * 60 * 1000;
+
+      if (latest && latest.action_type === 'IN' && new Date(latest.created_at).getTime() >= sixteenHoursAgo) {
+        setActiveShift({
+          locationName: latest.locations?.name || 'Şube',
+          checkInTime: latest.created_at,
+        });
+      } else {
+        setActiveShift(null);
       }
     }
   };
@@ -134,26 +149,16 @@ export default function HomePage() {
           <p className="text-xs text-slate-400">Personel Takip (@{user.username})</p>
           <h2 className="font-semibold text-base">{user.full_name}</h2>
         </div>
-        <div className="flex items-center gap-2">
-          {user.role === 'admin' && (
-            <button
-              onClick={() => router.push('/admin')}
-              className="flex items-center gap-1 text-xs bg-indigo-600 hover:bg-indigo-500 px-3 py-2 rounded-lg font-medium"
-            >
-              <ShieldCheck className="w-4 h-4" /> Yönetim
-            </button>
-          )}
-          <button
-            onClick={handleLogout}
-            className="p-2 text-slate-400 hover:text-white bg-slate-900 rounded-lg border border-slate-800"
-            title="Çıkış Yap"
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
-        </div>
+        <button
+          onClick={handleLogout}
+          className="p-2 text-slate-400 hover:text-white bg-slate-900 rounded-lg border border-slate-800"
+          title="Çıkış Yap"
+        >
+          <LogOut className="w-4 h-4" />
+        </button>
       </div>
 
-      {/* Canlı Çalışma Kronometresi (İçerideyse görünür) */}
+      {/* Canlı Çalışma Kronometresi (Sadece son hareket GİRİŞ ise görünür) */}
       {activeShift && (
         <div className="w-full max-w-md bg-emerald-950/40 border border-emerald-500/40 rounded-2xl p-4 mb-5 flex items-center justify-between">
           <div>
