@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
-import { getSessionUser, clearSessionUser } from '@/lib/session';
+import { getSessionUser, clearSessionUser, AppUser } from '@/lib/session';
 import { useRouter } from 'next/navigation';
 import {
   ArrowLeft,
@@ -18,6 +18,11 @@ import {
   LogOut,
   MapPin,
   Clock,
+  Calendar,
+  Building2,
+  LogOut as ForceOutIcon,
+  Save,
+  Plus,
 } from 'lucide-react';
 
 interface ActiveWorker {
@@ -25,7 +30,7 @@ interface ActiveWorker {
   fullName: string;
   username: string;
   checkInTime: string;
-  distanceMeters: number;
+  locationId: string;
 }
 
 interface LocationBox {
@@ -34,13 +39,43 @@ interface LocationBox {
   activeWorkers: ActiveWorker[];
 }
 
+interface ShiftSummary {
+  id: string;
+  date: string;
+  staffName: string;
+  locationName: string;
+  inTime: string;
+  outTime: string | null;
+  durationText: string;
+  durationMinutes: number;
+}
+
 export default function AdminPage() {
-  const [activeTab, setActiveTab] = useState<'logs' | 'staff'>('logs');
-  const [locationBoxes, setLocationBoxes] = useState<LocationBox[]>([]);
-  const [staffList, setStaffList] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [adminUser, setAdminUser] = useState<AppUser | null>(null);
+  const [activeTab, setActiveTab] = useState<'live' | 'report' | 'locations' | 'staff'>('live');
   const router = useRouter();
 
+  // Canlı durum state'leri
+  const [locationBoxes, setLocationBoxes] = useState<LocationBox[]>([]);
+  const [loadingLive, setLoadingLive] = useState(true);
+
+  // Puantaj & Rapor state'leri
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [selectedLocFilter, setSelectedLocFilter] = useState('ALL');
+  const [shifts, setShifts] = useState<ShiftSummary[]>([]);
+  const [loadingReport, setLoadingReport] = useState(false);
+
+  // Şube yönetimi state'leri
+  const [locationsList, setLocationsList] = useState<any[]>([]);
+  const [newLocName, setNewLocName] = useState('');
+  const [newLocSecret, setNewLocSecret] = useState('');
+  const [newLocLat, setNewLocLat] = useState('');
+  const [newLocLng, setNewLocLng] = useState('');
+  const [newLocRadius, setNewLocRadius] = useState('75');
+
+  // Personel yönetimi state'leri
+  const [staffList, setStaffList] = useState<any[]>([]);
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -54,42 +89,55 @@ export default function AdminPage() {
       router.push('/login');
       return;
     }
-    Promise.all([fetchLiveLocations(), fetchStaff()]);
+
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const firstDayStr = new Date(now.getFullYear(), now.getMonth(), 1)
+      .toISOString()
+      .slice(0, 10);
+    setStartDate(firstDayStr);
+    setEndDate(todayStr);
+
+    setAdminUser(user);
+    fetchLiveLocations();
+    fetchLocationsList();
+    fetchStaff();
   }, []);
 
-  const fetchLiveLocations = async () => {
-    setLoading(true);
+  useEffect(() => {
+    if (activeTab === 'report' && startDate && endDate) {
+      fetchPuantajReport();
+    }
+  }, [activeTab, startDate, endDate, selectedLocFilter]);
 
-    // 1. Tüm şubeleri çek
+  // 1. CANLI DURUM ÇEKME (Son 16 saatlik vardiyaya göre)
+  const fetchLiveLocations = async () => {
+    setLoadingLive(true);
+
     const { data: locations } = await supabase
       .from('locations')
       .select('id, name')
       .order('name', { ascending: true });
 
-    // 2. Bugünün başlangıcından itibaren tüm giriş/çıkış hareketlerini çek
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const sixteenHoursAgo = new Date(Date.now() - 16 * 60 * 60 * 1000).toISOString();
 
-    const { data: todayLogs } = await supabase
+    const { data: recentLogs } = await supabase
       .from('attendance_logs')
-      .select('user_id, location_id, action_type, created_at, distance_meters, profiles(full_name, username)')
-      .gte('created_at', todayStart.toISOString())
+      .select('user_id, location_id, action_type, created_at, profiles(full_name, username)')
+      .gte('created_at', sixteenHoursAgo)
       .order('created_at', { ascending: false });
 
-    // 3. Her personelin bugünkü EN SON hareketini bul (sadece son hareketi 'IN' olanlar içeridedir)
     const latestUserStatus = new Map<string, any>();
-    if (todayLogs) {
-      for (const log of todayLogs) {
+    if (recentLogs) {
+      for (const log of recentLogs) {
         if (!latestUserStatus.has(log.user_id)) {
           latestUserStatus.set(log.user_id, log);
         }
       }
     }
 
-    // 4. Şube kutularını oluştur ve içerideki personelleri ilgili şubeye yerleştir
     const boxes: LocationBox[] = (locations || []).map((loc) => {
       const workersInThisLoc: ActiveWorker[] = [];
-
       latestUserStatus.forEach((log) => {
         if (log.action_type === 'IN' && log.location_id === loc.id) {
           const prof = Array.isArray(log.profiles) ? log.profiles[0] : log.profiles;
@@ -98,26 +146,195 @@ export default function AdminPage() {
             fullName: prof?.full_name || 'İsimsiz Personel',
             username: prof?.username || '',
             checkInTime: log.created_at,
-            distanceMeters: log.distance_meters,
+            locationId: loc.id,
           });
         }
       });
-
-      return {
-        id: loc.id,
-        name: loc.name,
-        activeWorkers: workersInThisLoc,
-      };
+      return { id: loc.id, name: loc.name, activeWorkers: workersInThisLoc };
     });
 
     setLocationBoxes(boxes);
-    setLoading(false);
+    setLoadingLive(false);
   };
 
+  // Yönetici tarafından manuel çıkış verme (Çıkış QR okutmayı unutan personel için)
+  const forceCheckOut = async (worker: ActiveWorker) => {
+    if (!confirm(`${worker.fullName} için manuel çıkış kaydı oluşturulsun mu?`)) return;
+
+    const { error } = await supabase.from('attendance_logs').insert({
+      user_id: worker.userId,
+      location_id: worker.locationId,
+      action_type: 'OUT',
+      scanned_lat: 0,
+      scanned_lng: 0,
+      distance_meters: 0,
+    });
+
+    if (!error) {
+      fetchLiveLocations();
+    }
+  };
+
+  // 2. PUANTAJ & ÇALIŞMA SÜRESİ RAPORU
+  const fetchPuantajReport = async () => {
+    setLoadingReport(true);
+    const startISO = new Date(`${startDate}T00:00:00`).toISOString();
+    const endISO = new Date(`${endDate}T23:59:59`).toISOString();
+
+    let query = supabase
+      .from('attendance_logs')
+      .select('id, user_id, location_id, action_type, created_at, profiles(full_name), locations(name)')
+      .gte('created_at', startISO)
+      .lte('created_at', endISO)
+      .order('created_at', { ascending: true });
+
+    if (selectedLocFilter !== 'ALL') {
+      query = query.eq('location_id', selectedLocFilter);
+    }
+
+    const { data: rawLogs } = await query;
+
+    const openShifts = new Map<string, any>();
+    const completedShifts: ShiftSummary[] = [];
+
+    (rawLogs || []).forEach((log: any) => {
+      const prof = Array.isArray(log.profiles) ? log.profiles[0] : log.profiles;
+      const loc = Array.isArray(log.locations) ? log.locations[0] : log.locations;
+      const staffName = prof?.full_name || 'Bilinmiyor';
+      const locationName = loc?.name || '';
+
+      if (log.action_type === 'IN') {
+        if (openShifts.has(log.user_id)) {
+          const prev = openShifts.get(log.user_id);
+          completedShifts.push({
+            id: prev.id,
+            date: new Date(prev.created_at).toLocaleDateString('tr-TR'),
+            staffName: prev.staffName,
+            locationName: prev.locationName,
+            inTime: new Date(prev.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+            outTime: null,
+            durationText: 'Çıkış Eksik',
+            durationMinutes: 0,
+          });
+        }
+        openShifts.set(log.user_id, { ...log, staffName, locationName });
+      } else if (log.action_type === 'OUT') {
+        const matchingIn = openShifts.get(log.user_id);
+        if (matchingIn) {
+          const diffMs = new Date(log.created_at).getTime() - new Date(matchingIn.created_at).getTime();
+          const totalMins = Math.max(0, Math.floor(diffMs / 60000));
+          const hours = Math.floor(totalMins / 60);
+          const mins = totalMins % 60;
+
+          completedShifts.push({
+            id: matchingIn.id,
+            date: new Date(matchingIn.created_at).toLocaleDateString('tr-TR'),
+            staffName,
+            locationName: matchingIn.locationName,
+            inTime: new Date(matchingIn.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+            outTime: new Date(log.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+            durationText: `${hours} sa ${mins} dk`,
+            durationMinutes: totalMins,
+          });
+          openShifts.delete(log.user_id);
+        }
+      }
+    });
+
+    openShifts.forEach((openLog) => {
+      completedShifts.push({
+        id: openLog.id,
+        date: new Date(openLog.created_at).toLocaleDateString('tr-TR'),
+        staffName: openLog.staffName,
+        locationName: openLog.locationName,
+        inTime: new Date(openLog.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+        outTime: 'İçeride',
+        durationText: 'Devam Ediyor',
+        durationMinutes: 0,
+      });
+    });
+
+    setShifts(completedShifts.reverse());
+    setLoadingReport(false);
+  };
+
+  const exportPuantajCSV = () => {
+    const headers = ['Tarih', 'Personel', 'Sube', 'Giris_Saati', 'Cikis_Saati', 'Net_Calisma_Suresi'];
+    const rows = shifts.map((s) => [
+      s.date,
+      s.staffName,
+      s.locationName,
+      s.inTime,
+      s.outTime || 'Çıkış Yok',
+      s.durationText,
+    ]);
+
+    const csvContent =
+      'data:text/csv;charset=utf-8,\uFEFF' +
+      [headers.join(';'), ...rows.map((e) => e.join(';'))].join('\n');
+
+    const link = document.createElement('a');
+    link.setAttribute('href', encodeURI(csvContent));
+    link.setAttribute('download', `puantaj_${startDate}_${endDate}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // 3. ŞUBE YÖNETİMİ
+  const fetchLocationsList = async () => {
+    const { data } = await supabase.from('locations').select('*').order('name');
+    if (data) setLocationsList(data);
+  };
+
+  const updateLocationField = (id: string, field: string, value: any) => {
+    setLocationsList((prev) =>
+      prev.map((loc) => (loc.id === id ? { ...loc, [field]: value } : loc))
+    );
+  };
+
+  const saveLocationRow = async (loc: any) => {
+    const { error } = await supabase
+      .from('locations')
+      .update({
+        name: loc.name,
+        latitude: parseFloat(loc.latitude),
+        longitude: parseFloat(loc.longitude),
+        radius_meters: parseInt(loc.radius_meters, 10),
+      })
+      .eq('id', loc.id);
+
+    if (!error) alert(`${loc.name} güncellendi.`);
+  };
+
+  const handleAddLocation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const { error } = await supabase.from('locations').insert({
+      name: newLocName.trim(),
+      qr_secret: newLocSecret.trim(),
+      latitude: parseFloat(newLocLat),
+      longitude: parseFloat(newLocLng),
+      radius_meters: parseInt(newLocRadius, 10),
+    });
+
+    if (!error) {
+      setNewLocName('');
+      setNewLocSecret('');
+      setNewLocLat('');
+      setNewLocLng('');
+      setNewLocRadius('75');
+      fetchLocationsList();
+      fetchLiveLocations();
+    } else {
+      alert('Şube eklenemedi: ' + error.message);
+    }
+  };
+
+  // 4. PERSONEL YÖNETİMİ (RPC ile güvenli ekleme)
   const fetchStaff = async () => {
     const { data } = await supabase
       .from('profiles')
-      .select('*')
+      .select('id, full_name, username, role, device_id')
       .order('full_name', { ascending: true });
 
     if (data) setStaffList(data);
@@ -125,6 +342,7 @@ export default function AdminPage() {
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!adminUser) return;
     setCreating(true);
     setFormMessage(null);
 
@@ -135,17 +353,18 @@ export default function AdminPage() {
       return;
     }
 
-    const { error } = await supabase.from('profiles').insert({
-      full_name: fullName.trim(),
-      username: cleanUsername,
-      password: password.trim(),
-      role,
+    const { error } = await supabase.rpc('admin_create_user', {
+      p_admin_id: adminUser.id,
+      p_full_name: fullName,
+      p_username: cleanUsername,
+      p_password: password,
+      p_role: role,
     });
 
     if (error) {
       setFormMessage({
         type: 'error',
-        text: error.code === '23505' ? 'Bu kullanıcı adı zaten kayıtlı.' : error.message,
+        text: error.message.includes('duplicate') ? 'Bu kullanıcı adı zaten kayıtlı.' : error.message,
       });
     } else {
       setFormMessage({
@@ -180,34 +399,6 @@ export default function AdminPage() {
     fetchStaff();
   };
 
-  const exportLiveCSV = () => {
-    const headers = ['Sube_Lokasyon', 'Personel', 'Kullanici_Adi', 'Giris_Saati', 'Mesafe_Metre'];
-    const rows: any[] = [];
-
-    locationBoxes.forEach((box) => {
-      box.activeWorkers.forEach((w) => {
-        rows.push([
-          box.name,
-          w.fullName,
-          w.username,
-          new Date(w.checkInTime).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
-          w.distanceMeters,
-        ]);
-      });
-    });
-
-    const csvContent =
-      'data:text/csv;charset=utf-8,\uFEFF' +
-      [headers.join(';'), ...rows.map((e) => e.join(';'))].join('\n');
-
-    const link = document.createElement('a');
-    link.setAttribute('href', encodeURI(csvContent));
-    link.setAttribute('download', `aktif_personel_${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
   const totalActiveCount = locationBoxes.reduce((sum, box) => sum + box.activeWorkers.length, 0);
 
   return (
@@ -225,31 +416,43 @@ export default function AdminPage() {
             </button>
             <div>
               <h1 className="text-xl font-bold">Yönetici Paneli</h1>
-              <p className="text-xs text-slate-400">Şube bazlı anlık personel durumu ve yönetim</p>
+              <p className="text-xs text-slate-400">Canlı takip, puantaj raporları ve şube yönetimi</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800">
               <button
-                onClick={() => setActiveTab('logs')}
-                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition ${
-                  activeTab === 'logs'
-                    ? 'bg-emerald-600 text-white'
-                    : 'text-slate-400 hover:text-white'
+                onClick={() => setActiveTab('live')}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition ${
+                  activeTab === 'live' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
                 }`}
               >
-                <ClipboardList className="w-4 h-4" /> Canlı Hareketler
+                <ClipboardList className="w-4 h-4" /> Canlı Durum
+              </button>
+              <button
+                onClick={() => setActiveTab('report')}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition ${
+                  activeTab === 'report' ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Calendar className="w-4 h-4" /> Puantaj & Rapor
+              </button>
+              <button
+                onClick={() => setActiveTab('locations')}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition ${
+                  activeTab === 'locations' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Building2 className="w-4 h-4" /> Şubeler
               </button>
               <button
                 onClick={() => setActiveTab('staff')}
-                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition ${
-                  activeTab === 'staff'
-                    ? 'bg-indigo-600 text-white'
-                    : 'text-slate-400 hover:text-white'
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition ${
+                  activeTab === 'staff' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
                 }`}
               >
-                <Users className="w-4 h-4" /> Personel Yönetimi
+                <Users className="w-4 h-4" /> Personeller
               </button>
             </div>
 
@@ -266,94 +469,87 @@ export default function AdminPage() {
           </div>
         </div>
 
-        {/* SEKME 1: LOKASYON BAZLI CANLI KUTULAR */}
-        {activeTab === 'logs' && (
+        {/* SEKME 1: CANLI LOKASYON KUTULARI */}
+        {activeTab === 'live' && (
           <>
             <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
               <div className="text-sm text-slate-300">
                 Şu an işyerlerinde aktif toplam personel:{' '}
                 <span className="font-bold text-emerald-400">{totalActiveCount} kişi</span>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={fetchLiveLocations}
-                  className="flex items-center gap-1.5 px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm hover:bg-slate-800"
-                >
-                  <RefreshCw className="w-4 h-4" /> Yenile
-                </button>
-                <button
-                  onClick={exportLiveCSV}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium"
-                >
-                  <Download className="w-4 h-4" /> Aktif Listeyi İndir
-                </button>
-              </div>
+              <button
+                onClick={fetchLiveLocations}
+                className="flex items-center gap-1.5 px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm hover:bg-slate-800"
+              >
+                <RefreshCw className="w-4 h-4" /> Yenile
+              </button>
             </div>
 
-            {loading ? (
+            {loadingLive ? (
               <div className="text-center py-12 text-slate-400">Şube verileri yükleniyor...</div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                 {locationBoxes.map((box) => (
                   <div
                     key={box.id}
-                    className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between shadow-lg"
+                    className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg"
                   >
-                    <div>
-                      {/* Kutu Üst Başlık */}
-                      <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
-                        <div className="flex items-center gap-2.5">
-                          <div className="p-2 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-emerald-400">
-                            <MapPin className="w-5 h-5" />
-                          </div>
-                          <h2 className="font-bold text-base text-white">{box.name}</h2>
+                    <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
+                      <div className="flex items-center gap-2.5">
+                        <div className="p-2 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-emerald-400">
+                          <MapPin className="w-5 h-5" />
                         </div>
-                        <span
-                          className={`px-2.5 py-1 rounded-full text-xs font-bold ${
-                            box.activeWorkers.length > 0
-                              ? 'bg-emerald-500/20 text-emerald-400'
-                              : 'bg-slate-800 text-slate-400'
-                          }`}
-                        >
-                          {box.activeWorkers.length} Çalışan
-                        </span>
+                        <h2 className="font-bold text-base text-white">{box.name}</h2>
                       </div>
-
-                      {/* Kutu İçi Çalışan Listesi */}
-                      {box.activeWorkers.length === 0 ? (
-                        <div className="py-8 text-center text-sm text-slate-500 bg-slate-950/40 rounded-xl border border-slate-800/50">
-                          Şu an bu lokasyonda aktif çalışan bulunmuyor.
-                        </div>
-                      ) : (
-                        <ul className="space-y-2.5">
-                          {box.activeWorkers.map((worker) => (
-                            <li
-                              key={worker.userId}
-                              className="flex items-center justify-between bg-slate-800/50 border border-slate-700/60 px-3.5 py-2.5 rounded-xl"
-                            >
-                              <div className="flex items-center gap-2.5">
-                                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-                                <div>
-                                  <p className="text-sm font-semibold text-white">{worker.fullName}</p>
-                                  {worker.username && (
-                                    <p className="text-xs text-slate-400 font-mono">@{worker.username}</p>
-                                  )}
-                                </div>
-                              </div>
-                              <div className="text-right">
-                                <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-300 bg-emerald-500/10 px-2 py-1 rounded-md">
-                                  <Clock className="w-3 h-3" />
-                                  {new Date(worker.checkInTime).toLocaleTimeString('tr-TR', {
-                                    hour: '2-digit',
-                                    minute: '2-digit',
-                                  })}
-                                </span>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
+                      <span
+                        className={`px-2.5 py-1 rounded-full text-xs font-bold ${
+                          box.activeWorkers.length > 0
+                            ? 'bg-emerald-500/20 text-emerald-400'
+                            : 'bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {box.activeWorkers.length} Çalışan
+                      </span>
                     </div>
+
+                    {box.activeWorkers.length === 0 ? (
+                      <div className="py-8 text-center text-sm text-slate-500 bg-slate-950/40 rounded-xl border border-slate-800/50">
+                        Şu an bu lokasyonda aktif çalışan bulunmuyor.
+                      </div>
+                    ) : (
+                      <ul className="space-y-2.5">
+                        {box.activeWorkers.map((worker) => (
+                          <li
+                            key={worker.userId}
+                            className="flex items-center justify-between bg-slate-800/50 border border-slate-700/60 px-3.5 py-2.5 rounded-xl"
+                          >
+                            <div className="flex items-center gap-2.5">
+                              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+                              <div>
+                                <p className="text-sm font-semibold text-white">{worker.fullName}</p>
+                                <p className="text-xs text-slate-400 font-mono">@{worker.username}</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-300 bg-emerald-500/10 px-2 py-1 rounded-md">
+                                <Clock className="w-3 h-3" />
+                                {new Date(worker.checkInTime).toLocaleTimeString('tr-TR', {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                              </span>
+                              <button
+                                onClick={() => forceCheckOut(worker)}
+                                className="text-xs px-2 py-1 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 rounded-md flex items-center gap-1"
+                                title="Manuel Çıkış Ver"
+                              >
+                                <ForceOutIcon className="w-3 h-3" /> Çıkış Ver
+                              </button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
                 ))}
               </div>
@@ -361,7 +557,241 @@ export default function AdminPage() {
           </>
         )}
 
-        {/* SEKME 2: PERSONEL EKLEME & LİSTE */}
+        {/* SEKME 2: PUANTAJ & ÇALIŞMA SÜRESİ RAPORU */}
+        {activeTab === 'report' && (
+          <div className="space-y-4">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-wrap items-end justify-between gap-4">
+              <div className="flex flex-wrap items-end gap-3">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Başlangıç Tarihi</label>
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Bitiş Tarihi</label>
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Şube Filtresi</label>
+                  <select
+                    value={selectedLocFilter}
+                    onChange={(e) => setSelectedLocFilter(e.target.value)}
+                    className="px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
+                  >
+                    <option value="ALL">Tüm Şubeler</option>
+                    {locationsList.map((loc) => (
+                      <option key={loc.id} value={loc.id}>
+                        {loc.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <button
+                onClick={exportPuantajCSV}
+                className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium"
+              >
+                <Download className="w-4 h-4" /> Puantajı Excel İndir
+              </button>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase">
+                    <tr>
+                      <th className="px-4 py-3">Tarih</th>
+                      <th className="px-4 py-3">Personel</th>
+                      <th className="px-4 py-3">Şube</th>
+                      <th className="px-4 py-3">Giriş</th>
+                      <th className="px-4 py-3">Çıkış</th>
+                      <th className="px-4 py-3">Net Süre</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {loadingReport ? (
+                      <tr>
+                        <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
+                          Hesaplanıyor...
+                        </td>
+                      </tr>
+                    ) : shifts.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
+                          Seçilen tarih aralığında vardiya kaydı bulunamadı.
+                        </td>
+                      </tr>
+                    ) : (
+                      shifts.map((s) => (
+                        <tr key={s.id} className="hover:bg-slate-800/30">
+                          <td className="px-4 py-3 text-slate-300">{s.date}</td>
+                          <td className="px-4 py-3 font-medium">{s.staffName}</td>
+                          <td className="px-4 py-3 text-slate-300">{s.locationName}</td>
+                          <td className="px-4 py-3 text-emerald-400 font-mono">{s.inTime}</td>
+                          <td className="px-4 py-3 text-amber-400 font-mono">{s.outTime || '-'}</td>
+                          <td className="px-4 py-3 font-semibold text-white">{s.durationText}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* SEKME 3: ŞUBE & KOORDİNAT YÖNETİMİ */}
+        {activeTab === 'locations' && (
+          <div className="space-y-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+              <div className="p-4 border-b border-slate-800">
+                <h2 className="font-semibold text-sm">Mevcut Şubeler & Mesafe Sınırları</h2>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase">
+                    <tr>
+                      <th className="px-4 py-3">Şube Adı</th>
+                      <th className="px-4 py-3">Enlem (Lat)</th>
+                      <th className="px-4 py-3">Boylam (Lng)</th>
+                      <th className="px-4 py-3">Yarıçap (Metre)</th>
+                      <th className="px-4 py-3">QR Kodu</th>
+                      <th className="px-4 py-3 text-right">Kaydet</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {locationsList.map((loc) => (
+                      <tr key={loc.id}>
+                        <td className="px-4 py-2.5">
+                          <input
+                            type="text"
+                            value={loc.name}
+                            onChange={(e) => updateLocationField(loc.id, 'name', e.target.value)}
+                            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm w-44"
+                          />
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <input
+                            type="text"
+                            value={loc.latitude}
+                            onChange={(e) => updateLocationField(loc.id, 'latitude', e.target.value)}
+                            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs font-mono w-32"
+                          />
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <input
+                            type="text"
+                            value={loc.longitude}
+                            onChange={(e) => updateLocationField(loc.id, 'longitude', e.target.value)}
+                            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs font-mono w-32"
+                          />
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <input
+                            type="number"
+                            value={loc.radius_meters}
+                            onChange={(e) => updateLocationField(loc.id, 'radius_meters', e.target.value)}
+                            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm w-20"
+                          />
+                        </td>
+                        <td className="px-4 py-2.5 text-xs font-mono text-slate-400">
+                          {loc.qr_secret}
+                        </td>
+                        <td className="px-4 py-2.5 text-right">
+                          <button
+                            onClick={() => saveLocationRow(loc)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-xs font-semibold"
+                          >
+                            <Save className="w-3.5 h-3.5" /> Kaydet
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Yeni Şube Ekleme Formu */}
+            <form
+              onSubmit={handleAddLocation}
+              className="bg-slate-900 border border-slate-800 rounded-2xl p-5 grid grid-cols-1 md:grid-cols-6 gap-3 items-end"
+            >
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Yeni Şube Adı</label>
+                <input
+                  type="text"
+                  required
+                  value={newLocName}
+                  onChange={(e) => setNewLocName(e.target.value)}
+                  placeholder="Örn: Merkez Ofis"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">QR Anahtarı</label>
+                <input
+                  type="text"
+                  required
+                  value={newLocSecret}
+                  onChange={(e) => setNewLocSecret(e.target.value)}
+                  placeholder="merkez_SECRET"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Enlem (Lat)</label>
+                <input
+                  type="text"
+                  required
+                  value={newLocLat}
+                  onChange={(e) => setNewLocLat(e.target.value)}
+                  placeholder="35.2227"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Boylam (Lng)</label>
+                <input
+                  type="text"
+                  required
+                  value={newLocLng}
+                  onChange={(e) => setNewLocLng(e.target.value)}
+                  placeholder="33.4817"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Yarıçap (m)</label>
+                <input
+                  type="number"
+                  required
+                  value={newLocRadius}
+                  onChange={(e) => setNewLocRadius(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
+                />
+              </div>
+              <button
+                type="submit"
+                className="py-2 px-4 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-semibold flex items-center justify-center gap-1"
+              >
+                <Plus className="w-4 h-4" /> Şube Ekle
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* SEKME 4: PERSONEL EKLEME & LİSTE */}
         {activeTab === 'staff' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 h-fit">
@@ -369,7 +799,7 @@ export default function AdminPage() {
                 <UserPlus className="w-5 h-5 text-indigo-400" /> Yeni Kullanıcı Ekle
               </h2>
               <p className="text-xs text-slate-400 mb-5">
-                Doğrudan veritabanına kullanıcı adı ve parola tanımlar.
+                Şifreler veritabanında güvenli olarak saklanır.
               </p>
 
               {formMessage && (
@@ -465,7 +895,6 @@ export default function AdminPage() {
                     <tr>
                       <th className="px-4 py-3">Ad Soyad</th>
                       <th className="px-4 py-3">Kullanıcı Adı</th>
-                      <th className="px-4 py-3">Parola</th>
                       <th className="px-4 py-3">Rol</th>
                       <th className="px-4 py-3">Cihaz</th>
                       <th className="px-4 py-3 text-right">İşlem</th>
@@ -476,7 +905,6 @@ export default function AdminPage() {
                       <tr key={person.id} className="hover:bg-slate-800/30">
                         <td className="px-4 py-3 font-medium">{person.full_name || 'İsimsiz'}</td>
                         <td className="px-4 py-3 text-slate-300 font-mono text-xs">{person.username}</td>
-                        <td className="px-4 py-3 text-slate-400 font-mono text-xs">{person.password}</td>
                         <td className="px-4 py-3">
                           <span
                             className={`px-2 py-0.5 rounded text-xs font-semibold ${
@@ -489,7 +917,9 @@ export default function AdminPage() {
                           </span>
                         </td>
                         <td className="px-4 py-3 text-xs">
-                          {person.device_id ? (
+                          {person.role === 'admin' ? (
+                            <span className="text-indigo-400">Sınırsız</span>
+                          ) : person.device_id ? (
                             <span className="text-emerald-400 flex items-center gap-1">
                               <Smartphone className="w-3.5 h-3.5" /> Tanımlı
                             </span>
@@ -498,7 +928,7 @@ export default function AdminPage() {
                           )}
                         </td>
                         <td className="px-4 py-3 text-right flex items-center justify-end gap-2">
-                          {person.device_id && (
+                          {person.device_id && person.role !== 'admin' && (
                             <button
                               onClick={() => resetDeviceLock(person.id, person.full_name)}
                               className="text-xs px-2 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-amber-300"

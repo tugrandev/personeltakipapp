@@ -87,19 +87,19 @@ function ScanProcessor() {
         return;
       }
 
-      const todayStart = new Date();
-      todayStart.setHours(0, 0, 0, 0);
+      // Son 16 saat içindeki en son harekete bak (Gece vardiyasını ve unutulan çıkışları doğru yönetir)
+      const sixteenHoursAgo = new Date(Date.now() - 16 * 60 * 60 * 1000).toISOString();
 
-      const { data: todayLogs } = await supabase
+      const { data: recentLogs } = await supabase
         .from('attendance_logs')
         .select('action_type')
         .eq('user_id', user.id)
-        .gte('created_at', todayStart.toISOString())
+        .gte('created_at', sixteenHoursAgo)
         .order('created_at', { ascending: false })
         .limit(1);
 
       const nextAction =
-        todayLogs && todayLogs.length > 0 && todayLogs[0].action_type === 'IN'
+        recentLogs && recentLogs.length > 0 && recentLogs[0].action_type === 'IN'
           ? 'OUT'
           : 'IN';
 
@@ -148,7 +148,7 @@ function ScanProcessor() {
             onClick={() => router.push('/')}
             className="mt-4 w-full py-3 bg-slate-800 hover:bg-slate-700 rounded-xl text-sm font-medium flex items-center justify-center gap-2"
           >
-            <Home className="w-4 h-4" /> Geçmiş Kayıtlarımı Gör
+            <Home className="w-4 h-4" /> Ana Sayfaya Dön
           </button>
         </div>
       )}

@@ -21,9 +21,7 @@ function LoginForm() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (redirectParam) {
-      setLoginMode('staff');
-    }
+    if (redirectParam) setLoginMode('staff');
   }, [redirectParam]);
 
   const getOrCreateDeviceId = () => {
@@ -40,31 +38,28 @@ function LoginForm() {
     setLoading(true);
     setError('');
 
-    const cleanUsername = username.trim().toLowerCase();
+    // Şifre tarayıcıya çekilmeden doğrudan veritabanında doğrulanır
+    const { data: users, error: rpcError } = await supabase.rpc('verify_user_login', {
+      p_username: username,
+      p_password: password,
+    });
 
-    // Doğrudan profiles tablosundan kullanıcı adı ve parola doğrulaması
-    const { data: profile, error: dbError } = await supabase
-      .from('profiles')
-      .select('id, full_name, username, password, role, device_id')
-      .eq('username', cleanUsername)
-      .single();
+    const profile = users && users.length > 0 ? users[0] : null;
 
-    if (dbError || !profile || profile.password !== password) {
+    if (rpcError || !profile) {
       setError('Kullanıcı adı veya parola hatalı.');
       setLoading(false);
       return;
     }
 
-    // Yönetici sekmesinden normal personel girmeye çalışırsa engelle
     if (loginMode === 'admin' && profile.role !== 'admin') {
       setError('Bu hesap yönetici yetkisine sahip değil. Kullanıcı girişini kullanın.');
       setLoading(false);
       return;
     }
 
-    // Cihaz kilidi kontrolü (Admin hariç)
     const currentDeviceId = getOrCreateDeviceId();
-    if (!profile.device_id) {
+    if (!profile.device_id && profile.role !== 'admin') {
       await supabase
         .from('profiles')
         .update({ device_id: currentDeviceId })
@@ -76,7 +71,6 @@ function LoginForm() {
       return;
     }
 
-    // Oturumu kaydet
     setSessionUser({
       id: profile.id,
       full_name: profile.full_name,

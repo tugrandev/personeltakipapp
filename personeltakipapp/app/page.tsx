@@ -1,14 +1,18 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { getSessionUser, clearSessionUser, AppUser } from '@/lib/session';
 import { useRouter } from 'next/navigation';
-import { LogOut, ShieldCheck, QrCode } from 'lucide-react';
+import { LogOut, ShieldCheck, QrCode, Camera, X } from 'lucide-react';
+import { Html5Qrcode } from 'html5-qrcode';
 
 export default function HomePage() {
   const [user, setUser] = useState<AppUser | null>(null);
   const [recentLogs, setRecentLogs] = useState<any[]>([]);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanError, setScanError] = useState('');
+  const scannerRef = useRef<Html5Qrcode | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -19,6 +23,10 @@ export default function HomePage() {
     }
     setUser(currentUser);
     fetchLogs(currentUser.id);
+
+    return () => {
+      stopScanner();
+    };
   }, []);
 
   const fetchLogs = async (userId: string) => {
@@ -31,7 +39,54 @@ export default function HomePage() {
     if (data) setRecentLogs(data);
   };
 
+  const startScanner = async () => {
+    setScanError('');
+    setScannerOpen(true);
+
+    setTimeout(async () => {
+      try {
+        const html5QrCode = new Html5Qrcode('qr-reader');
+        scannerRef.current = html5QrCode;
+
+        await html5QrCode.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 240, height: 240 } },
+          (decodedText) => {
+            stopScanner();
+            // Okunan URL'den ?loc= parametresini ayıkla
+            try {
+              const url = new URL(decodedText);
+              const loc = url.searchParams.get('loc');
+              if (loc) {
+                router.push(`/scan?loc=${encodeURIComponent(loc)}`);
+              } else {
+                setScanError('Geçersiz QR kod okutuldu.');
+              }
+            } catch {
+              setScanError('Bu QR kod sisteme ait değil.');
+            }
+          },
+          () => {}
+        );
+      } catch {
+        setScanError('Kamera başlatılamadı. Tarayıcı kamera iznini kontrol edin.');
+      }
+    }, 200);
+  };
+
+  const stopScanner = async () => {
+    if (scannerRef.current) {
+      try {
+        await scannerRef.current.stop();
+        scannerRef.current.clear();
+      } catch {}
+      scannerRef.current = null;
+    }
+    setScannerOpen(false);
+  };
+
   const handleLogout = () => {
+    stopScanner();
     clearSessionUser();
     router.push('/login');
   };
@@ -64,10 +119,41 @@ export default function HomePage() {
         </div>
       </div>
 
-      <div className="w-full max-w-md bg-slate-900/70 border border-slate-800 rounded-2xl p-4 mb-6 flex items-center gap-3 text-sm text-slate-300">
-        <QrCode className="w-8 h-8 text-emerald-400 shrink-0" />
-        <p>Giriş veya çıkış yapmak için telefonunuzun kamerasını açıp kapıdaki QR kodu okutmanız yeterlidir.</p>
-      </div>
+      {/* Uygulama İçi Kamera Tarayıcı */}
+      {scannerOpen ? (
+        <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-4 mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-sm font-semibold text-emerald-400 flex items-center gap-1.5">
+              <QrCode className="w-4 h-4" /> Kapıdaki QR Kodu Okutun
+            </span>
+            <button
+              onClick={stopScanner}
+              className="p-1.5 bg-slate-800 rounded-lg text-slate-400 hover:text-white"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div id="qr-reader" className="w-full overflow-hidden rounded-xl bg-black" />
+        </div>
+      ) : (
+        <div className="w-full max-w-md bg-slate-900/80 border border-slate-800 rounded-2xl p-5 mb-6 text-center">
+          <button
+            onClick={startScanner}
+            className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 rounded-xl font-bold text-base flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/50 transition"
+          >
+            <Camera className="w-5 h-5" /> Kamera ile QR Okut
+          </button>
+          <p className="text-xs text-slate-400 mt-3">
+            Giriş veya çıkış yapmak için butona basıp şube QR kodunu okutun.
+          </p>
+        </div>
+      )}
+
+      {scanError && (
+        <div className="w-full max-w-md bg-red-500/10 border border-red-500/40 text-red-300 text-xs p-3 rounded-xl mb-4">
+          {scanError}
+        </div>
+      )}
 
       <div className="w-full max-w-md">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">
