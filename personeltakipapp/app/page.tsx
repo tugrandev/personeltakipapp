@@ -1,21 +1,21 @@
 'use client';
 
-import { useEffect, useState, useRef, Suspense } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { getSessionUser, clearSessionUser, AppUser } from '@/lib/session';
-import { useRouter, useSearchParams } from 'next/navigation';
-import { LogOut, ShieldCheck, QrCode, Camera, X } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { LogOut, ShieldCheck, QrCode, Camera, X, Clock, MapPin } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 
-function HomeContent() {
+export default function HomePage() {
   const [user, setUser] = useState<AppUser | null>(null);
   const [recentLogs, setRecentLogs] = useState<any[]>([]);
+  const [activeShift, setActiveShift] = useState<{ locationName: string; checkInTime: string } | null>(null);
+  const [elapsedText, setElapsedText] = useState('');
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanError, setScanError] = useState('');
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const autoScan = searchParams.get('scan') === '1';
 
   useEffect(() => {
     const currentUser = getSessionUser();
@@ -26,14 +26,29 @@ function HomeContent() {
     setUser(currentUser);
     fetchLogs(currentUser.id);
 
-    if (autoScan) {
-      startScanner();
-    }
-
     return () => {
       stopScanner();
     };
   }, []);
+
+  // Aktif vardiya varsa saniyelik kronometreyi çalıştır
+  useEffect(() => {
+    if (!activeShift) return;
+
+    const updateTimer = () => {
+      const diffMs = Math.max(0, Date.now() - new Date(activeShift.checkInTime).getTime());
+      const hrs = Math.floor(diffMs / 3600000);
+      const mins = Math.floor((diffMs % 3600000) / 60000);
+      const secs = Math.floor((diffMs % 60000) / 1000);
+      setElapsedText(
+        `${String(hrs).padStart(2, '0')} sa ${String(mins).padStart(2, '0')} dk ${String(secs).padStart(2, '0')} sn`
+      );
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
+  }, [activeShift]);
 
   const fetchLogs = async (userId: string) => {
     const { data } = await supabase
@@ -42,7 +57,21 @@ function HomeContent() {
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
       .limit(15);
-    if (data) setRecentLogs(data);
+
+    if (data) {
+      setRecentLogs(data);
+
+      // Son 16 saat içinde en son hareket 'IN' ise çalışan şu an içeridedir
+      if (data.length > 0 && data[0].action_type === 'IN') {
+        const sixteenHoursAgo = Date.now() - 16 * 60 * 60 * 1000;
+        if (new Date(data[0].created_at).getTime() >= sixteenHoursAgo) {
+          setActiveShift({
+            locationName: data[0].locations?.name || 'Şube',
+            checkInTime: data[0].created_at,
+          });
+        }
+      }
+    }
   };
 
   const startScanner = async () => {
@@ -51,7 +80,6 @@ function HomeContent() {
 
     setTimeout(async () => {
       try {
-        if (scannerRef.current) return;
         const html5QrCode = new Html5Qrcode('qr-reader');
         scannerRef.current = html5QrCode;
 
@@ -77,7 +105,7 @@ function HomeContent() {
       } catch {
         setScanError('Kamera başlatılamadı. Tarayıcı kamera iznini kontrol edin.');
       }
-    }, 250);
+    }, 200);
   };
 
   const stopScanner = async () => {
@@ -101,7 +129,7 @@ function HomeContent() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center p-4">
-      <div className="w-full max-w-md flex items-center justify-between py-3 border-b border-slate-800 mb-6">
+      <div className="w-full max-w-md flex items-center justify-between py-3 border-b border-slate-800 mb-5">
         <div>
           <p className="text-xs text-slate-400">Personel Takip (@{user.username})</p>
           <h2 className="font-semibold text-base">{user.full_name}</h2>
@@ -125,6 +153,35 @@ function HomeContent() {
         </div>
       </div>
 
+      {/* Canlı Çalışma Kronometresi (İçerideyse görünür) */}
+      {activeShift && (
+        <div className="w-full max-w-md bg-emerald-950/40 border border-emerald-500/40 rounded-2xl p-4 mb-5 flex items-center justify-between">
+          <div>
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+              Şu An Mesaisiniz Devam Ediyor
+            </span>
+            <p className="text-sm font-bold text-white mt-1 flex items-center gap-1">
+              <MapPin className="w-3.5 h-3.5 text-emerald-400" /> {activeShift.locationName}
+            </p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Giriş:{' '}
+              {new Date(activeShift.checkInTime).toLocaleTimeString('tr-TR', {
+                hour: '2-digit',
+                minute: '2-digit',
+              })}
+            </p>
+          </div>
+          <div className="text-right bg-slate-900/90 border border-emerald-500/30 px-3 py-2 rounded-xl">
+            <p className="text-[10px] uppercase tracking-wider text-slate-400 flex items-center justify-end gap-1">
+              <Clock className="w-3 h-3 text-emerald-400" /> Süre
+            </p>
+            <p className="text-sm font-mono font-bold text-emerald-300 mt-0.5">{elapsedText}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Kamera Tarayıcı */}
       {scannerOpen ? (
         <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-4 mb-6">
           <div className="flex items-center justify-between mb-3">
@@ -146,10 +203,10 @@ function HomeContent() {
             onClick={startScanner}
             className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 rounded-xl font-bold text-base flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/50 transition"
           >
-            <Camera className="w-5 h-5" /> Kamera ile QR Okut
+            <Camera className="w-5 h-5" /> {activeShift ? 'Çıkış İçin QR Okut' : 'Giriş İçin QR Okut'}
           </button>
           <p className="text-xs text-slate-400 mt-3">
-            Giriş veya çıkış yapmak için butona basıp şube QR kodunu okutun.
+            İşlemi tamamlamak için şube kapısındaki QR kodu okutun.
           </p>
         </div>
       )}
@@ -201,13 +258,5 @@ function HomeContent() {
         </div>
       </div>
     </div>
-  );
-}
-
-export default function HomePage() {
-  return (
-    <Suspense fallback={<div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Yükleniyor...</div>}>
-      <HomeContent />
-    </Suspense>
   );
 }
