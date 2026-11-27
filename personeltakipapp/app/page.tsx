@@ -44,12 +44,14 @@ export default function HomePage() {
     router.push('/login');
   };
 
+  const displayUsername = user?.email ? user.email.split('@')[0] : '';
+
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center p-4">
       <div className="w-full max-w-md flex items-center justify-between py-3 border-b border-slate-800 mb-6">
         <div>
           <p className="text-xs text-slate-400">Personel Takip</p>
-          <h2 className="font-semibold text-base">{profile?.full_name || user?.email}</h2>
+          <h2 className="font-semibold text-base">{profile?.full_name || displayUsername}</h2>
         </div>
         <div className="flex items-center gap-2">
           {profile?.role === 'admin' && (
