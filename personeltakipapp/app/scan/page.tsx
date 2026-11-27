@@ -3,6 +3,7 @@
 import { useEffect, useState, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
+import { getSessionUser } from '@/lib/session';
 import { calculateDistanceMeters } from '@/lib/geo';
 import { CheckCircle2, XCircle, Loader2, Home } from 'lucide-react';
 
@@ -40,16 +41,13 @@ function ScanProcessor() {
       return;
     }
 
-    // 1. Kullanıcı giriş yapmış mı kontrol et
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = getSessionUser();
     if (!user) {
-      // Giriş yapmamışsa, giriş sonrası tekrar bu kapıya dönmesi için parametreyi sakla
       router.push(`/login?redirect=/scan?loc=${encodeURIComponent(locSecret)}`);
       return;
     }
 
     try {
-      // 2. Lokasyonu veritabanından bul
       const { data: location, error: locError } = await supabase
         .from('locations')
         .select('*')
@@ -63,7 +61,6 @@ function ScanProcessor() {
         return;
       }
 
-      // 3. GPS Konumunu Al
       let pos: GeolocationPosition;
       try {
         pos = await getCurrentPosition();
@@ -83,7 +80,6 @@ function ScanProcessor() {
         location.longitude
       );
 
-      // 4. Mesafe Kontrolü
       if (distance > location.radius_meters) {
         setStatus('error');
         setTitle('İşyeri Dışındasınız!');
@@ -91,7 +87,6 @@ function ScanProcessor() {
         return;
       }
 
-      // 5. Bugünkü son harekete göre Giriş (IN) veya Çıkış (OUT) belirle
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
 
@@ -108,7 +103,6 @@ function ScanProcessor() {
           ? 'OUT'
           : 'IN';
 
-      // 6. Kaydı Veritabanına Ekle
       const { error: insertError } = await supabase.from('attendance_logs').insert({
         user_id: user.id,
         location_id: location.id,

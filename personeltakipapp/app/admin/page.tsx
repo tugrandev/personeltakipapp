@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
+import { getSessionUser, clearSessionUser } from '@/lib/session';
 import { useRouter } from 'next/navigation';
 import {
   ArrowLeft,
@@ -13,6 +14,8 @@ import {
   Smartphone,
   CheckCircle2,
   AlertCircle,
+  Trash2,
+  LogOut,
 } from 'lucide-react';
 
 export default function AdminPage() {
@@ -22,7 +25,6 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const router = useRouter();
 
-  // Yeni personel formu state'leri
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -31,26 +33,13 @@ export default function AdminPage() {
   const [formMessage, setFormMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
-    verifyAndLoad();
-  }, []);
-
-  const verifyAndLoad = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return router.push('/login');
-
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('role')
-      .eq('id', user.id)
-      .single();
-
-    if (profile?.role !== 'admin') {
-      router.push('/');
+    const user = getSessionUser();
+    if (!user || user.role !== 'admin') {
+      router.push('/login');
       return;
     }
-
-    await Promise.all([fetchLogs(), fetchStaff()]);
-  };
+    Promise.all([fetchLogs(), fetchStaff()]);
+  }, []);
 
   const fetchLogs = async () => {
     setLoading(true);
@@ -78,30 +67,29 @@ export default function AdminPage() {
     setCreating(true);
     setFormMessage(null);
 
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) {
-      setFormMessage({ type: 'error', text: 'Oturum süresi dolmuş, tekrar giriş yapın.' });
+    const cleanUsername = username.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
+    if (cleanUsername.length < 3) {
+      setFormMessage({ type: 'error', text: 'Kullanıcı adı en az 3 karakter olmalıdır.' });
       setCreating(false);
       return;
     }
 
-    const res = await fetch('/api/admin/create-user', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({ fullName, username, password, role }),
+    const { error } = await supabase.from('profiles').insert({
+      full_name: fullName.trim(),
+      username: cleanUsername,
+      password: password.trim(),
+      role,
     });
 
-    const result = await res.json();
-
-    if (!res.ok) {
-      setFormMessage({ type: 'error', text: result.error || 'Kayıt başarısız.' });
+    if (error) {
+      setFormMessage({
+        type: 'error',
+        text: error.code === '23505' ? 'Bu kullanıcı adı zaten kayıtlı.' : error.message,
+      });
     } else {
       setFormMessage({
         type: 'success',
-        text: `${result.fullName} (Kullanıcı adı: ${result.username}) başarıyla oluşturuldu.`,
+        text: `${fullName.trim()} (${cleanUsername}) başarıyla oluşturuldu.`,
       });
       setFullName('');
       setUsername('');
@@ -120,9 +108,15 @@ export default function AdminPage() {
       .eq('id', userId);
 
     if (!error) {
-      alert(`${name} için telefon kilidi sıfırlandı. Yeni telefondan giriş yapabilir.`);
+      alert(`${name} için telefon kilidi sıfırlandı.`);
       fetchStaff();
     }
+  };
+
+  const deleteUser = async (userId: string, name: string) => {
+    if (!confirm(`${name} kullanıcısını silmek istediğinize emin misiniz?`)) return;
+    await supabase.from('profiles').delete().eq('id', userId);
+    fetchStaff();
   };
 
   const exportCSV = () => {
@@ -150,12 +144,12 @@ export default function AdminPage() {
   return (
     <div className="min-h-screen bg-slate-950 text-white p-4 md:p-8">
       <div className="max-w-5xl mx-auto">
-        {/* Üst Başlık */}
         <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
           <div className="flex items-center gap-3">
             <button
               onClick={() => router.push('/')}
               className="p-2 bg-slate-900 border border-slate-800 rounded-lg hover:bg-slate-800"
+              title="Ana Sayfa"
             >
               <ArrowLeft className="w-5 h-5" />
             </button>
@@ -165,32 +159,43 @@ export default function AdminPage() {
             </div>
           </div>
 
-          {/* Sekmeler */}
-          <div className="flex items-center gap-2 bg-slate-900 p-1 rounded-xl border border-slate-800">
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800">
+              <button
+                onClick={() => setActiveTab('logs')}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition ${
+                  activeTab === 'logs'
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <ClipboardList className="w-4 h-4" /> Canlı Hareketler
+              </button>
+              <button
+                onClick={() => setActiveTab('staff')}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition ${
+                  activeTab === 'staff'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Users className="w-4 h-4" /> Personel Yönetimi
+              </button>
+            </div>
+
             <button
-              onClick={() => setActiveTab('logs')}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition ${
-                activeTab === 'logs'
-                  ? 'bg-emerald-600 text-white'
-                  : 'text-slate-400 hover:text-white'
-              }`}
+              onClick={() => {
+                clearSessionUser();
+                router.push('/login');
+              }}
+              className="p-2.5 bg-slate-900 border border-slate-800 rounded-xl text-slate-400 hover:text-white"
+              title="Çıkış Yap"
             >
-              <ClipboardList className="w-4 h-4" /> Canlı Hareketler
-            </button>
-            <button
-              onClick={() => setActiveTab('staff')}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition ${
-                activeTab === 'staff'
-                  ? 'bg-indigo-600 text-white'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Users className="w-4 h-4" /> Personel Yönetimi
+              <LogOut className="w-4 h-4" />
             </button>
           </div>
         </div>
 
-        {/* SEKME 1: CANLI HAREKETLER */}
         {activeTab === 'logs' && (
           <>
             <div className="flex justify-end gap-2 mb-4">
@@ -263,16 +268,14 @@ export default function AdminPage() {
           </>
         )}
 
-        {/* SEKME 2: PERSONEL EKLEME & LİSTE */}
         {activeTab === 'staff' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Sol: Yeni Personel Formu */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 h-fit">
               <h2 className="text-lg font-bold flex items-center gap-2 mb-1">
                 <UserPlus className="w-5 h-5 text-indigo-400" /> Yeni Kullanıcı Ekle
               </h2>
               <p className="text-xs text-slate-400 mb-5">
-                E-posta gerekmez; yalnızca kullanıcı adı ve parola tanımlayın.
+                Doğrudan veritabanına kullanıcı adı ve parola tanımlar.
               </p>
 
               {formMessage && (
@@ -313,20 +316,19 @@ export default function AdminPage() {
                     autoCapitalize="none"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    placeholder="Örn: ahmet.yilmaz"
+                    placeholder="Örn: ahmet"
                     className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm focus:outline-none focus:border-indigo-500"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Parola (En az 6 karakter)</label>
+                  <label className="block text-xs text-slate-400 mb-1">Parola</label>
                   <input
                     type="text"
                     required
-                    minLength={6}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Örn: 123456"
+                    placeholder="Örn: 1234"
                     className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm focus:outline-none focus:border-indigo-500"
                   />
                 </div>
@@ -348,15 +350,14 @@ export default function AdminPage() {
                   disabled={creating}
                   className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-semibold transition disabled:opacity-50"
                 >
-                  {creating ? 'Oluşturuluyor...' : 'Kullanıcıyı Oluştur'}
+                  {creating ? 'Kaydediliyor...' : 'Kullanıcıyı Ekle'}
                 </button>
               </form>
             </div>
 
-            {/* Sağ: Kayıtlı Personel Listesi */}
             <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
               <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-                <h2 className="font-semibold text-sm">Kayıtlı Personeller ({staffList.length})</h2>
+                <h2 className="font-semibold text-sm">Kayıtlı Kullanıcılar ({staffList.length})</h2>
                 <button
                   onClick={fetchStaff}
                   className="text-xs text-slate-400 hover:text-white flex items-center gap-1"
@@ -369,8 +370,10 @@ export default function AdminPage() {
                   <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase">
                     <tr>
                       <th className="px-4 py-3">Ad Soyad</th>
+                      <th className="px-4 py-3">Kullanıcı Adı</th>
+                      <th className="px-4 py-3">Parola</th>
                       <th className="px-4 py-3">Rol</th>
-                      <th className="px-4 py-3">Cihaz Durumu</th>
+                      <th className="px-4 py-3">Cihaz</th>
                       <th className="px-4 py-3 text-right">İşlem</th>
                     </tr>
                   </thead>
@@ -378,6 +381,8 @@ export default function AdminPage() {
                     {staffList.map((person) => (
                       <tr key={person.id} className="hover:bg-slate-800/30">
                         <td className="px-4 py-3 font-medium">{person.full_name || 'İsimsiz'}</td>
+                        <td className="px-4 py-3 text-slate-300 font-mono text-xs">{person.username}</td>
+                        <td className="px-4 py-3 text-slate-400 font-mono text-xs">{person.password}</td>
                         <td className="px-4 py-3">
                           <span
                             className={`px-2 py-0.5 rounded text-xs font-semibold ${
@@ -392,21 +397,28 @@ export default function AdminPage() {
                         <td className="px-4 py-3 text-xs">
                           {person.device_id ? (
                             <span className="text-emerald-400 flex items-center gap-1">
-                              <Smartphone className="w-3.5 h-3.5" /> Telefona Tanımlı
+                              <Smartphone className="w-3.5 h-3.5" /> Tanımlı
                             </span>
                           ) : (
-                            <span className="text-slate-500">Henüz giriş yapmadı</span>
+                            <span className="text-slate-500">Boş</span>
                           )}
                         </td>
-                        <td className="px-4 py-3 text-right">
+                        <td className="px-4 py-3 text-right flex items-center justify-end gap-2">
                           {person.device_id && (
                             <button
                               onClick={() => resetDeviceLock(person.id, person.full_name)}
-                              className="text-xs px-2.5 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-amber-300"
+                              className="text-xs px-2 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-amber-300"
                             >
-                              Cihaz Kilidini Sıfırla
+                              Cihaz Sıfırla
                             </button>
                           )}
+                          <button
+                            onClick={() => deleteUser(person.id, person.full_name)}
+                            className="p-1.5 text-slate-400 hover:text-red-400"
+                            title="Kullanıcıyı Sil"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </td>
                       </tr>
                     ))}

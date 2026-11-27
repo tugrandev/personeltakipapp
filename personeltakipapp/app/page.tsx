@@ -2,59 +2,51 @@
 
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
+import { getSessionUser, clearSessionUser, AppUser } from '@/lib/session';
 import { useRouter } from 'next/navigation';
 import { LogOut, ShieldCheck, QrCode } from 'lucide-react';
 
 export default function HomePage() {
-  const [user, setUser] = useState<any>(null);
-  const [profile, setProfile] = useState<any>(null);
+  const [user, setUser] = useState<AppUser | null>(null);
   const [recentLogs, setRecentLogs] = useState<any[]>([]);
   const router = useRouter();
 
   useEffect(() => {
-    checkUser();
-  }, []);
-
-  const checkUser = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) {
+    const currentUser = getSessionUser();
+    if (!currentUser) {
       router.push('/login');
       return;
     }
-    setUser(user);
+    setUser(currentUser);
+    fetchLogs(currentUser.id);
+  }, []);
 
-    const { data: prof } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', user.id)
-      .single();
-    setProfile(prof);
-
+  const fetchLogs = async (userId: string) => {
     const { data } = await supabase
       .from('attendance_logs')
       .select('*, locations(name)')
-      .eq('user_id', user.id)
+      .eq('user_id', userId)
       .order('created_at', { ascending: false })
       .limit(15);
     if (data) setRecentLogs(data);
   };
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
+  const handleLogout = () => {
+    clearSessionUser();
     router.push('/login');
   };
 
-  const displayUsername = user?.email ? user.email.split('@')[0] : '';
+  if (!user) return null;
 
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center p-4">
       <div className="w-full max-w-md flex items-center justify-between py-3 border-b border-slate-800 mb-6">
         <div>
-          <p className="text-xs text-slate-400">Personel Takip</p>
-          <h2 className="font-semibold text-base">{profile?.full_name || displayUsername}</h2>
+          <p className="text-xs text-slate-400">Personel Takip (@{user.username})</p>
+          <h2 className="font-semibold text-base">{user.full_name}</h2>
         </div>
         <div className="flex items-center gap-2">
-          {profile?.role === 'admin' && (
+          {user.role === 'admin' && (
             <button
               onClick={() => router.push('/admin')}
               className="flex items-center gap-1 text-xs bg-indigo-600 hover:bg-indigo-500 px-3 py-2 rounded-lg font-medium"

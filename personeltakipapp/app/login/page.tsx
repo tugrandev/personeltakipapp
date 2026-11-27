@@ -2,6 +2,7 @@
 
 import { useState, useEffect, Suspense } from 'react';
 import { supabase } from '@/lib/supabase';
+import { setSessionUser } from '@/lib/session';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ShieldCheck, UserCheck } from 'lucide-react';
 
@@ -10,8 +11,6 @@ function LoginForm() {
   const searchParams = useSearchParams();
   const redirectParam = searchParams.get('redirect');
 
-  // QR koddan gelindiyse (?redirect=...) varsayılan olarak Personel Girişi,
-  // site doğrudan açıldıysa varsayılan olarak Yönetici Girişi açılır.
   const [loginMode, setLoginMode] = useState<'admin' | 'staff'>(
     redirectParam ? 'staff' : 'admin'
   );
@@ -36,66 +35,59 @@ function LoginForm() {
     return deviceId;
   };
 
-  // Kullanıcı adından '@' kaldırıldığı için arka planda Supabase uyumlu formata çevirir.
-  // Eğer eski bir e-posta adresiyle giriliyorsa '@' içerdiği için olduğu gibi bırakır.
-  const formatAuthEmail = (rawInput: string) => {
-    const cleaned = rawInput.trim().toLowerCase();
-    if (cleaned.includes('@')) return cleaned;
-    return `${cleaned}@personeltakip.local`;
-  };
-
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError('');
 
-    const formattedEmail = formatAuthEmail(username);
+    const cleanUsername = username.trim().toLowerCase();
 
-    const { data, error: authError } = await supabase.auth.signInWithPassword({
-      email: formattedEmail,
-      password,
-    });
+    // Doğrudan profiles tablosundan kullanıcı adı ve parola doğrulaması
+    const { data: profile, error: dbError } = await supabase
+      .from('profiles')
+      .select('id, full_name, username, password, role, device_id')
+      .eq('username', cleanUsername)
+      .single();
 
-    if (authError || !data.user) {
-      setError('Kullanıcı adı veya şifre hatalı.');
+    if (dbError || !profile || profile.password !== password) {
+      setError('Kullanıcı adı veya parola hatalı.');
       setLoading(false);
       return;
     }
 
-    const currentDeviceId = getOrCreateDeviceId();
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('device_id, role')
-      .eq('id', data.user.id)
-      .single();
-
-    if (profile) {
-      // Yönetici girişi sekmesinden normal personel girmeye çalışırsa uyar
-      if (loginMode === 'admin' && profile.role !== 'admin') {
-        await supabase.auth.signOut();
-        setError('Bu hesap yönetici yetkisine sahip değil. Personel girişini kullanın.');
-        setLoading(false);
-        return;
-      }
-
-      // Cihaz kilidi kontrolü (Admin hariç)
-      if (!profile.device_id) {
-        await supabase
-          .from('profiles')
-          .update({ device_id: currentDeviceId })
-          .eq('id', data.user.id);
-      } else if (profile.device_id !== currentDeviceId && profile.role !== 'admin') {
-        await supabase.auth.signOut();
-        setError('Bu hesap başka bir telefona tanımlı! Yönetici ile iletişime geçin.');
-        setLoading(false);
-        return;
-      }
+    // Yönetici sekmesinden normal personel girmeye çalışırsa engelle
+    if (loginMode === 'admin' && profile.role !== 'admin') {
+      setError('Bu hesap yönetici yetkisine sahip değil. Kullanıcı girişini kullanın.');
+      setLoading(false);
+      return;
     }
 
-    // Yönlendirme hedefi
+    // Cihaz kilidi kontrolü (Admin hariç)
+    const currentDeviceId = getOrCreateDeviceId();
+    if (!profile.device_id) {
+      await supabase
+        .from('profiles')
+        .update({ device_id: currentDeviceId })
+        .eq('id', profile.id);
+      profile.device_id = currentDeviceId;
+    } else if (profile.device_id !== currentDeviceId && profile.role !== 'admin') {
+      setError('Bu hesap başka bir telefona tanımlı! Yönetici ile iletişime geçin.');
+      setLoading(false);
+      return;
+    }
+
+    // Oturumu kaydet
+    setSessionUser({
+      id: profile.id,
+      full_name: profile.full_name,
+      username: profile.username,
+      role: profile.role,
+      device_id: profile.device_id,
+    });
+
     if (redirectParam) {
       router.push(redirectParam);
-    } else if (loginMode === 'admin' || profile?.role === 'admin') {
+    } else if (loginMode === 'admin' || profile.role === 'admin') {
       router.push('/admin');
     } else {
       router.push('/');
@@ -146,7 +138,7 @@ function LoginForm() {
           />
         </div>
         <div>
-          <label className="block text-xs text-slate-400 mb-1">Şifre</label>
+          <label className="block text-xs text-slate-400 mb-1">Parola</label>
           <input
             type="password"
             required
