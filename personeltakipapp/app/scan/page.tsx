@@ -1,186 +1,213 @@
 'use client';
 
-import { useEffect, useState, Suspense } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
+import { useEffect, useState, useRef, Suspense } from 'react';
 import { supabase } from '@/lib/supabase';
-import { getSessionUser } from '@/lib/session';
-import { calculateDistanceMeters } from '@/lib/geo';
-import { CheckCircle2, XCircle, Loader2, Home } from 'lucide-react';
+import { getSessionUser, clearSessionUser, AppUser } from '@/lib/session';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { LogOut, ShieldCheck, QrCode, Camera, X } from 'lucide-react';
+import { Html5Qrcode } from 'html5-qrcode';
 
-function ScanProcessor() {
-  const searchParams = useSearchParams();
+function HomeContent() {
+  const [user, setUser] = useState<AppUser | null>(null);
+  const [recentLogs, setRecentLogs] = useState<any[]>([]);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanError, setScanError] = useState('');
+  const scannerRef = useRef<Html5Qrcode | null>(null);
   const router = useRouter();
-  const locSecret = searchParams.get('loc');
-
-  const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
-  const [title, setTitle] = useState('Konum ve QR doğrulanıyor...');
-  const [detail, setDetail] = useState('Lütfen konum izni istendiğinde onay verin.');
+  const searchParams = useSearchParams();
+  const autoScan = searchParams.get('scan') === '1';
 
   useEffect(() => {
-    processScan();
-  }, [locSecret]);
+    const currentUser = getSessionUser();
+    if (!currentUser) {
+      router.push('/login');
+      return;
+    }
+    setUser(currentUser);
+    fetchLogs(currentUser.id);
 
-  const getCurrentPosition = (): Promise<GeolocationPosition> => {
-    return new Promise((resolve, reject) => {
-      if (!navigator.geolocation) {
-        reject(new Error('Cihazınız konum servisini desteklemiyor.'));
-      }
-      navigator.geolocation.getCurrentPosition(resolve, reject, {
-        enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 0,
-      });
-    });
+    if (autoScan) {
+      startScanner();
+    }
+
+    return () => {
+      stopScanner();
+    };
+  }, []);
+
+  const fetchLogs = async (userId: string) => {
+    const { data } = await supabase
+      .from('attendance_logs')
+      .select('*, locations(name)')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(15);
+    if (data) setRecentLogs(data);
   };
 
-  const processScan = async () => {
-    // Tekrar dene butonuna basıldığında ekranı sıfırla
-    setStatus('loading');
-    setTitle('Konum ve QR doğrulanıyor...');
-    setDetail('Lütfen konum izni istendiğinde onay verin.');
+  const startScanner = async () => {
+    setScanError('');
+    setScannerOpen(true);
 
-    if (!locSecret) {
-      setStatus('error');
-      setTitle('Geçersiz QR Bağlantısı');
-      setDetail('QR kodda lokasyon bilgisi bulunamadı.');
-      return;
-    }
-
-    const user = getSessionUser();
-    if (!user) {
-      router.push(`/login?redirect=/scan?loc=${encodeURIComponent(locSecret)}`);
-      return;
-    }
-
-    try {
-      const { data: location, error: locError } = await supabase
-        .from('locations')
-        .select('*')
-        .eq('qr_secret', locSecret)
-        .single();
-
-      if (locError || !location) {
-        setStatus('error');
-        setTitle('Tanımsız Lokasyon');
-        setDetail('Okutulan QR kod sistemdeki hiçbir şubeye ait değil.');
-        return;
-      }
-
-      let pos: GeolocationPosition;
+    setTimeout(async () => {
       try {
-        pos = await getCurrentPosition();
+        if (scannerRef.current) return;
+        const html5QrCode = new Html5Qrcode('qr-reader');
+        scannerRef.current = html5QrCode;
+
+        await html5QrCode.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 240, height: 240 } },
+          (decodedText) => {
+            stopScanner();
+            try {
+              const url = new URL(decodedText);
+              const loc = url.searchParams.get('loc');
+              if (loc) {
+                router.push(`/scan?loc=${encodeURIComponent(loc)}`);
+              } else {
+                setScanError('Geçersiz QR kod okutuldu.');
+              }
+            } catch {
+              setScanError('Bu QR kod sisteme ait değil.');
+            }
+          },
+          () => {}
+        );
       } catch {
-        setStatus('error');
-        setTitle('Konum Alınamadı');
-        setDetail('İşlemi tamamlamak için telefonunuzun konum (GPS) servisini açıp tarayıcıya izin verin.');
-        return;
+        setScanError('Kamera başlatılamadı. Tarayıcı kamera iznini kontrol edin.');
       }
-
-      const userLat = pos.coords.latitude;
-      const userLng = pos.coords.longitude;
-      const distance = calculateDistanceMeters(
-        userLat,
-        userLng,
-        location.latitude,
-        location.longitude
-      );
-
-      if (distance > location.radius_meters) {
-        setStatus('error');
-        setTitle('İşyeri Dışındasınız!');
-        setDetail(`${location.name} noktasına ${distance}m uzaktasınız (Maksimum sınır: ${location.radius_meters}m).`);
-        return;
-      }
-
-      const sixteenHoursAgo = new Date(Date.now() - 16 * 60 * 60 * 1000).toISOString();
-
-      const { data: recentLogs } = await supabase
-        .from('attendance_logs')
-        .select('action_type')
-        .eq('user_id', user.id)
-        .gte('created_at', sixteenHoursAgo)
-        .order('created_at', { ascending: false })
-        .limit(1);
-
-      const nextAction =
-        recentLogs && recentLogs.length > 0 && recentLogs[0].action_type === 'IN'
-          ? 'OUT'
-          : 'IN';
-
-      const { error: insertError } = await supabase.from('attendance_logs').insert({
-        user_id: user.id,
-        location_id: location.id,
-        action_type: nextAction,
-        scanned_lat: userLat,
-        scanned_lng: userLng,
-        distance_meters: distance,
-      });
-
-      if (insertError) throw insertError;
-
-      const timeStr = new Date().toLocaleTimeString('tr-TR', {
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-
-      setStatus('success');
-      setTitle(`${nextAction === 'IN' ? 'GİRİŞ' : 'ÇIKIŞ'} KAYDEDİLDİ (${timeStr})`);
-      setDetail(`${location.name} • Konum doğrulandı (${distance}m)`);
-    } catch (err: any) {
-      setStatus('error');
-      setTitle('Kayıt Başarısız');
-      setDetail(err.message || 'Bir hata oluştu, lütfen tekrar QR okutun.');
-    }
+    }, 250);
   };
+
+  const stopScanner = async () => {
+    if (scannerRef.current) {
+      try {
+        await scannerRef.current.stop();
+        scannerRef.current.clear();
+      } catch {}
+      scannerRef.current = null;
+    }
+    setScannerOpen(false);
+  };
+
+  const handleLogout = () => {
+    stopScanner();
+    clearSessionUser();
+    router.push('/login');
+  };
+
+  if (!user) return null;
 
   return (
-    <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center shadow-2xl">
-      {status === 'loading' && (
-        <div className="flex flex-col items-center gap-4">
-          <Loader2 className="w-14 h-14 animate-spin text-emerald-500" />
-          <h1 className="text-xl font-bold">{title}</h1>
-          <p className="text-sm text-slate-400">{detail}</p>
+    <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center p-4">
+      <div className="w-full max-w-md flex items-center justify-between py-3 border-b border-slate-800 mb-6">
+        <div>
+          <p className="text-xs text-slate-400">Personel Takip (@{user.username})</p>
+          <h2 className="font-semibold text-base">{user.full_name}</h2>
+        </div>
+        <div className="flex items-center gap-2">
+          {user.role === 'admin' && (
+            <button
+              onClick={() => router.push('/admin')}
+              className="flex items-center gap-1 text-xs bg-indigo-600 hover:bg-indigo-500 px-3 py-2 rounded-lg font-medium"
+            >
+              <ShieldCheck className="w-4 h-4" /> Yönetim
+            </button>
+          )}
+          <button
+            onClick={handleLogout}
+            className="p-2 text-slate-400 hover:text-white bg-slate-900 rounded-lg border border-slate-800"
+            title="Çıkış Yap"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {scannerOpen ? (
+        <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-4 mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-sm font-semibold text-emerald-400 flex items-center gap-1.5">
+              <QrCode className="w-4 h-4" /> Kapıdaki QR Kodu Okutun
+            </span>
+            <button
+              onClick={stopScanner}
+              className="p-1.5 bg-slate-800 rounded-lg text-slate-400 hover:text-white"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div id="qr-reader" className="w-full overflow-hidden rounded-xl bg-black" />
+        </div>
+      ) : (
+        <div className="w-full max-w-md bg-slate-900/80 border border-slate-800 rounded-2xl p-5 mb-6 text-center">
+          <button
+            onClick={startScanner}
+            className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 rounded-xl font-bold text-base flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/50 transition"
+          >
+            <Camera className="w-5 h-5" /> Kamera ile QR Okut
+          </button>
+          <p className="text-xs text-slate-400 mt-3">
+            Giriş veya çıkış yapmak için butona basıp şube QR kodunu okutun.
+          </p>
         </div>
       )}
 
-      {status === 'success' && (
-        <div className="flex flex-col items-center gap-4">
-          <CheckCircle2 className="w-16 h-16 text-emerald-400" />
-          <h1 className="text-2xl font-bold text-emerald-400">{title}</h1>
-          <p className="text-sm text-slate-300">{detail}</p>
-          <button
-            onClick={() => router.push('/')}
-            className="mt-4 w-full py-3 bg-slate-800 hover:bg-slate-700 rounded-xl text-sm font-medium flex items-center justify-center gap-2"
-          >
-            <Home className="w-4 h-4" /> Ana Sayfaya Dön
-          </button>
+      {scanError && (
+        <div className="w-full max-w-md bg-red-500/10 border border-red-500/40 text-red-300 text-xs p-3 rounded-xl mb-4">
+          {scanError}
         </div>
       )}
 
-      {status === 'error' && (
-        <div className="flex flex-col items-center gap-4">
-          <XCircle className="w-16 h-16 text-red-400" />
-          <h1 className="text-2xl font-bold text-red-400">{title}</h1>
-          <p className="text-sm text-slate-300">{detail}</p>
-          <button
-            type="button"
-            onClick={() => processScan()}
-            className="mt-4 w-full py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm font-semibold"
-          >
-            Tekrar Dene
-          </button>
+      <div className="w-full max-w-md">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">
+          Son Hareketleriniz
+        </h3>
+        <div className="space-y-2">
+          {recentLogs.length === 0 ? (
+            <p className="text-sm text-slate-500 bg-slate-900/50 p-4 rounded-xl border border-slate-800/60">
+              Henüz giriş-çıkış kaydınız bulunmuyor.
+            </p>
+          ) : (
+            recentLogs.map((log) => (
+              <div
+                key={log.id}
+                className="flex items-center justify-between bg-slate-900 border border-slate-800 px-4 py-3 rounded-xl text-sm"
+              >
+                <div>
+                  <span
+                    className={`inline-block px-2 py-0.5 rounded text-xs font-bold mr-2 ${
+                      log.action_type === 'IN'
+                        ? 'bg-emerald-500/20 text-emerald-400'
+                        : 'bg-amber-500/20 text-amber-400'
+                    }`}
+                  >
+                    {log.action_type === 'IN' ? 'GİRİŞ' : 'ÇIKIŞ'}
+                  </span>
+                  <span className="text-slate-200">{log.locations?.name}</span>
+                </div>
+                <span className="text-xs text-slate-400">
+                  {new Date(log.created_at).toLocaleString('tr-TR', {
+                    day: '2-digit',
+                    month: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </span>
+              </div>
+            ))
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
 
-export default function ScanPage() {
+export default function HomePage() {
   return (
-    <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center p-4">
-      <Suspense fallback={<div className="text-slate-400">Yükleniyor...</div>}>
-        <ScanProcessor />
-      </Suspense>
-    </div>
+    <Suspense fallback={<div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Yükleniyor...</div>}>
+      <HomeContent />
+    </Suspense>
   );
 }
