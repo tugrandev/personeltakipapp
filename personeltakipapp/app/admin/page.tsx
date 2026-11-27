@@ -143,12 +143,23 @@ export default function AdminPage() {
     }
   }, [activeTab, startDate, endDate, selectedLocFilter]);
 
-  // Yardımcı: "09:30" formatını dakikaya çevirir (570)
+  // Yardımcı: "09:30" formatını dakikaya çevirir
   const timeToMinutes = (hhmm?: string | null): number | null => {
     if (!hhmm || !hhmm.includes(':')) return null;
     const [h, m] = hhmm.split(':').map(Number);
     if (isNaN(h) || isNaN(m)) return null;
     return h * 60 + m;
+  };
+
+  // Yardımcı: Dakikayı okunabilir saat ve dakika formatına çevirir (Örn: "59 dakika", "1 saat 59 dakika", "2 saat")
+  const formatDuration = (totalMinutes: number): string => {
+    const mins = Math.max(0, Math.round(totalMinutes));
+    if (mins === 0) return '0 dakika';
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    if (h === 0) return `${m} dakika`;
+    if (m === 0) return `${h} saat`;
+    return `${h} saat ${m} dakika`;
   };
 
   // 1. CANLI DURUM
@@ -223,7 +234,6 @@ export default function AdminPage() {
 
     const { data: rawLogs } = await query;
 
-    // İzin kayıtlarını da tarih aralığı için çek
     const { data: periodLeaves } = await supabase
       .from('leaves')
       .select('user_id, leave_date, leave_type, profiles(full_name)')
@@ -239,7 +249,6 @@ export default function AdminPage() {
       const staffName = prof?.full_name || 'Bilinmiyor';
       const locationName = loc?.name || '';
 
-      // Öncelik: Personel özel mesai saati -> yoksa Şube mesai saati
       const effStart = prof?.shift_start || loc?.shift_start || '09:00';
       const effEnd = prof?.shift_end || loc?.shift_end || '18:00';
       const grace = loc?.grace_minutes ?? 10;
@@ -264,7 +273,6 @@ export default function AdminPage() {
           });
         }
 
-        // Geç kalma hesabı
         const inDate = new Date(log.created_at);
         const actualInMins = inDate.getHours() * 60 + inDate.getMinutes();
         const expectedInMins = timeToMinutes(effStart);
@@ -287,10 +295,7 @@ export default function AdminPage() {
         if (matchingIn) {
           const diffMs = new Date(log.created_at).getTime() - new Date(matchingIn.created_at).getTime();
           const totalMins = Math.max(0, Math.floor(diffMs / 60000));
-          const hours = Math.floor(totalMins / 60);
-          const mins = totalMins % 60;
 
-          // Fazla mesai hesabı (Planlanan vardiya süresini 15 dk'dan fazla aştıysa)
           const sMins = timeToMinutes(matchingIn.effStart);
           const eMins = timeToMinutes(matchingIn.effEnd);
           let overtimeMins = 0;
@@ -314,7 +319,7 @@ export default function AdminPage() {
             expectedShift: matchingIn.expectedShift,
             inTime: new Date(matchingIn.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
             outTime: new Date(log.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
-            durationText: `${hours} sa ${mins} dk`,
+            durationText: formatDuration(totalMins),
             durationMinutes: totalMins,
             lateMinutes: matchingIn.lateMinutes,
             overtimeMinutes: overtimeMins,
@@ -325,7 +330,16 @@ export default function AdminPage() {
       }
     });
 
+    // Hâlâ içeride olan aktif vardiyalar için şu ana kadar geçen süreyi hesapla
+    const nowMs = Date.now();
+    const sixteenHoursMs = 16 * 60 * 60 * 1000;
+
     openShifts.forEach((openLog) => {
+      const checkInMs = new Date(openLog.created_at).getTime();
+      const elapsedMs = Math.max(0, nowMs - checkInMs);
+      const isStillActive = elapsedMs <= sixteenHoursMs;
+      const activeMinutes = isStillActive ? Math.floor(elapsedMs / 60000) : 0;
+
       completedShifts.push({
         id: openLog.id,
         userId: openLog.user_id,
@@ -334,12 +348,12 @@ export default function AdminPage() {
         locationName: openLog.locationName,
         expectedShift: openLog.expectedShift,
         inTime: new Date(openLog.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
-        outTime: 'İçeride',
-        durationText: 'Devam Ediyor',
-        durationMinutes: 0,
+        outTime: isStillActive ? 'İçeride' : null,
+        durationText: isStillActive ? `${formatDuration(activeMinutes)} (Devam Ediyor)` : 'Çıkış Eksik',
+        durationMinutes: activeMinutes,
         lateMinutes: openLog.lateMinutes,
         overtimeMinutes: 0,
-        statusBadge: 'open',
+        statusBadge: isStillActive ? 'open' : 'missing',
       });
     });
 
@@ -391,7 +405,7 @@ export default function AdminPage() {
   };
 
   const exportPuantajCSV = () => {
-    const headers = ['Tarih', 'Personel', 'Sube', 'Vardiya', 'Giris', 'Cikis', 'Net_Sure', 'Gec_Kalma_Dk', 'Fazla_Mesai_Dk'];
+    const headers = ['Tarih', 'Personel', 'Sube', 'Vardiya', 'Giris', 'Cikis', 'Net_Sure', 'Gec_Kalma', 'Fazla_Mesai'];
     const rows = shifts.map((s) => [
       s.date,
       s.staffName,
@@ -400,8 +414,8 @@ export default function AdminPage() {
       s.inTime,
       s.outTime || 'Çıkış Yok',
       s.durationText,
-      s.lateMinutes,
-      s.overtimeMinutes,
+      s.lateMinutes > 0 ? formatDuration(s.lateMinutes) : '0 dakika',
+      s.overtimeMinutes > 0 ? formatDuration(s.overtimeMinutes) : '0 dakika',
     ]);
 
     const csvContent =
@@ -792,12 +806,20 @@ export default function AdminPage() {
                 </div>
               </div>
 
-              <button
-                onClick={exportPuantajCSV}
-                className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium"
-              >
-                <Download className="w-4 h-4" /> Puantajı Excel İndir
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={fetchPuantajReport}
+                  className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 border border-slate-700 hover:bg-slate-700 rounded-lg text-sm"
+                >
+                  <RefreshCw className="w-4 h-4" /> Yenile
+                </button>
+                <button
+                  onClick={exportPuantajCSV}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium"
+                >
+                  <Download className="w-4 h-4" /> Puantajı Excel İndir
+                </button>
+              </div>
             </div>
 
             {/* Personel Bazlı Aylık Özet Tablosu */}
@@ -807,49 +829,45 @@ export default function AdminPage() {
                   Seçili Dönem Personel Bazlı Toplam Özet
                 </h2>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {monthlySummaries.map((m) => {
-                    const totH = Math.floor(m.totalMinutes / 60);
-                    const totM = m.totalMinutes % 60;
-                    return (
-                      <div
-                        key={m.userId}
-                        className="bg-slate-800/60 border border-slate-700/70 rounded-xl p-3.5 flex flex-col justify-between"
-                      >
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="font-bold text-sm text-white">{m.staffName}</span>
-                          <span className="text-xs px-2 py-0.5 bg-indigo-500/20 text-indigo-300 rounded font-semibold">
-                            {m.daysWorked} Gün Çalıştı
+                  {monthlySummaries.map((m) => (
+                    <div
+                      key={m.userId}
+                      className="bg-slate-800/60 border border-slate-700/70 rounded-xl p-3.5 flex flex-col justify-between"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-bold text-sm text-white">{m.staffName}</span>
+                        <span className="text-xs px-2 py-0.5 bg-indigo-500/20 text-indigo-300 rounded font-semibold">
+                          {m.daysWorked} Gün Çalıştı
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-300 space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Toplam Süre:</span>
+                          <span className="font-bold text-emerald-400">
+                            {formatDuration(m.totalMinutes)}
                           </span>
                         </div>
-                        <div className="text-xs text-slate-300 space-y-1">
-                          <div className="flex justify-between">
-                            <span className="text-slate-400">Toplam Süre:</span>
-                            <span className="font-bold text-emerald-400">
-                              {totH} sa {totM} dk
-                            </span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-slate-400">Toplam Geç Kalma:</span>
-                            <span className={m.totalLateMinutes > 0 ? 'text-red-400 font-semibold' : 'text-slate-400'}>
-                              {m.totalLateMinutes} dk
-                            </span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-slate-400">Fazla Mesai:</span>
-                            <span className={m.totalOvertimeMinutes > 0 ? 'text-cyan-400 font-semibold' : 'text-slate-400'}>
-                              {m.totalOvertimeMinutes} dk
-                            </span>
-                          </div>
-                          {m.leaveDays > 0 && (
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">İzinli / Raporlu:</span>
-                              <span className="text-rose-300 font-semibold">{m.leaveDays} Gün</span>
-                            </div>
-                          )}
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Toplam Geç Kalma:</span>
+                          <span className={m.totalLateMinutes > 0 ? 'text-red-400 font-semibold' : 'text-slate-400'}>
+                            {formatDuration(m.totalLateMinutes)}
+                          </span>
                         </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Fazla Mesai:</span>
+                          <span className={m.totalOvertimeMinutes > 0 ? 'text-cyan-400 font-semibold' : 'text-slate-400'}>
+                            {formatDuration(m.totalOvertimeMinutes)}
+                          </span>
+                        </div>
+                        {m.leaveDays > 0 && (
+                          <div className="flex justify-between">
+                            <span className="text-slate-400">İzinli / Raporlu:</span>
+                            <span className="text-rose-300 font-semibold">{m.leaveDays} Gün</span>
+                          </div>
+                        )}
                       </div>
-                    );
-                  })}
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -897,12 +915,12 @@ export default function AdminPage() {
                             <div className="flex flex-wrap gap-1">
                               {s.lateMinutes > 0 && (
                                 <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-300 font-semibold">
-                                  +{s.lateMinutes} dk Geç
+                                  {formatDuration(s.lateMinutes)} Geç
                                 </span>
                               )}
                               {s.overtimeMinutes > 0 && (
                                 <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-semibold">
-                                  +{s.overtimeMinutes} dk Mesai
+                                  {formatDuration(s.overtimeMinutes)} Mesai
                                 </span>
                               )}
                               {s.lateMinutes === 0 && s.overtimeMinutes === 0 && s.statusBadge === 'normal' && (
