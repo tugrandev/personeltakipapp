@@ -1,19 +1,21 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, Suspense } from 'react';
 import { supabase } from '@/lib/supabase';
 import { getSessionUser, clearSessionUser, AppUser } from '@/lib/session';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { LogOut, ShieldCheck, QrCode, Camera, X } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 
-export default function HomePage() {
+function HomeContent() {
   const [user, setUser] = useState<AppUser | null>(null);
   const [recentLogs, setRecentLogs] = useState<any[]>([]);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanError, setScanError] = useState('');
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const autoScan = searchParams.get('scan') === '1';
 
   useEffect(() => {
     const currentUser = getSessionUser();
@@ -23,6 +25,10 @@ export default function HomePage() {
     }
     setUser(currentUser);
     fetchLogs(currentUser.id);
+
+    if (autoScan) {
+      startScanner();
+    }
 
     return () => {
       stopScanner();
@@ -45,6 +51,7 @@ export default function HomePage() {
 
     setTimeout(async () => {
       try {
+        if (scannerRef.current) return;
         const html5QrCode = new Html5Qrcode('qr-reader');
         scannerRef.current = html5QrCode;
 
@@ -53,7 +60,6 @@ export default function HomePage() {
           { fps: 10, qrbox: { width: 240, height: 240 } },
           (decodedText) => {
             stopScanner();
-            // Okunan URL'den ?loc= parametresini ayıkla
             try {
               const url = new URL(decodedText);
               const loc = url.searchParams.get('loc');
@@ -71,7 +77,7 @@ export default function HomePage() {
       } catch {
         setScanError('Kamera başlatılamadı. Tarayıcı kamera iznini kontrol edin.');
       }
-    }, 200);
+    }, 250);
   };
 
   const stopScanner = async () => {
@@ -119,7 +125,6 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* Uygulama İçi Kamera Tarayıcı */}
       {scannerOpen ? (
         <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-4 mb-6">
           <div className="flex items-center justify-between mb-3">
@@ -196,5 +201,13 @@ export default function HomePage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function HomePage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Yükleniyor...</div>}>
+      <HomeContent />
+    </Suspense>
   );
 }
