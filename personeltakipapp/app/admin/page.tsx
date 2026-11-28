@@ -28,6 +28,9 @@ import {
   Printer,
   X,
   FileCheck2,
+  Coffee,
+  Check,
+  XCircle,
 } from 'lucide-react';
 
 interface ActiveWorker {
@@ -36,6 +39,7 @@ interface ActiveWorker {
   username: string;
   checkInTime: string;
   locationId: string;
+  isOnBreak: boolean;
 }
 
 interface LocationBox {
@@ -55,6 +59,8 @@ interface ShiftSummary {
   outTime: string | null;
   durationText: string;
   durationMinutes: number;
+  breakMinutes: number;
+  breakExcessMinutes: number;
   lateMinutes: number;
   overtimeMinutes: number;
   statusBadge: 'normal' | 'late' | 'overtime' | 'open' | 'missing';
@@ -65,6 +71,7 @@ interface MonthlyUserSummary {
   staffName: string;
   daysWorked: number;
   totalMinutes: number;
+  totalBreakMinutes: number;
   totalLateMinutes: number;
   totalOvertimeMinutes: number;
   leaveDays: number;
@@ -87,8 +94,9 @@ export default function AdminPage() {
   const [monthlySummaries, setMonthlySummaries] = useState<MonthlyUserSummary[]>([]);
   const [loadingReport, setLoadingReport] = useState(false);
 
-  // İzin yönetimi
+  // İzin yönetimi & Personel Talepleri
   const [leavesList, setLeavesList] = useState<any[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<any[]>([]);
   const [leaveUserId, setLeaveUserId] = useState('');
   const [leaveDate, setLeaveDate] = useState('');
   const [leaveType, setLeaveType] = useState('Yıllık İzin');
@@ -104,6 +112,7 @@ export default function AdminPage() {
   const [newLocRadius, setNewLocRadius] = useState('75');
   const [newLocStart, setNewLocStart] = useState('09:00');
   const [newLocEnd, setNewLocEnd] = useState('18:00');
+  const [newLocBreak, setNewLocBreak] = useState('45');
 
   // Personel yönetimi
   const [staffList, setStaffList] = useState<any[]>([]);
@@ -119,7 +128,7 @@ export default function AdminPage() {
   useEffect(() => {
     const user = getSessionUser();
     if (!user || user.role !== 'admin') {
-      router.push('/login');
+      window.location.href = '/login';
       return;
     }
 
@@ -135,6 +144,7 @@ export default function AdminPage() {
     fetchLocationsList();
     fetchStaff();
     fetchLeaves();
+    fetchPendingLeaveRequests();
   }, []);
 
   useEffect(() => {
@@ -143,7 +153,6 @@ export default function AdminPage() {
     }
   }, [activeTab, startDate, endDate, selectedLocFilter]);
 
-  // Yardımcı: "09:30" formatını dakikaya çevirir
   const timeToMinutes = (hhmm?: string | null): number | null => {
     if (!hhmm || !hhmm.includes(':')) return null;
     const [h, m] = hhmm.split(':').map(Number);
@@ -151,18 +160,17 @@ export default function AdminPage() {
     return h * 60 + m;
   };
 
-  // Yardımcı: Dakikayı okunabilir saat ve dakika formatına çevirir (Örn: "59 dakika", "1 saat 59 dakika", "2 saat")
   const formatDuration = (totalMinutes: number): string => {
     const mins = Math.max(0, Math.round(totalMinutes));
-    if (mins === 0) return '0 dakika';
+    if (mins === 0) return '0 dk';
     const h = Math.floor(mins / 60);
     const m = mins % 60;
-    if (h === 0) return `${m} dakika`;
-    if (m === 0) return `${h} saat`;
-    return `${h} saat ${m} dakika`;
+    if (h === 0) return `${m} dk`;
+    if (m === 0) return `${h} sa`;
+    return `${h} sa ${m} dk`;
   };
 
-  // 1. CANLI DURUM
+  // 1. CANLI DURUM (Molada olanları da gösterir)
   const fetchLiveLocations = async () => {
     setLoadingLive(true);
     const { data: locations } = await supabase.from('locations').select('id, name').order('name');
@@ -175,21 +183,29 @@ export default function AdminPage() {
       .order('created_at', { ascending: false });
 
     const latestUserStatus = new Map<string, any>();
+    const firstInTimeMap = new Map<string, string>();
+
     (recentLogs || []).forEach((log) => {
-      if (!latestUserStatus.has(log.user_id)) latestUserStatus.set(log.user_id, log);
+      if (!latestUserStatus.has(log.user_id)) {
+        latestUserStatus.set(log.user_id, log);
+      }
+      if (log.action_type === 'IN' && !firstInTimeMap.has(log.user_id)) {
+        firstInTimeMap.set(log.user_id, log.created_at);
+      }
     });
 
     const boxes: LocationBox[] = (locations || []).map((loc) => {
       const workers: ActiveWorker[] = [];
       latestUserStatus.forEach((log) => {
-        if (log.action_type === 'IN' && log.location_id === loc.id) {
+        if (log.action_type !== 'OUT' && log.location_id === loc.id) {
           const prof = Array.isArray(log.profiles) ? log.profiles[0] : log.profiles;
           workers.push({
             userId: log.user_id,
             fullName: prof?.full_name || 'İsimsiz',
             username: prof?.username || '',
-            checkInTime: log.created_at,
+            checkInTime: firstInTimeMap.get(log.user_id) || log.created_at,
             locationId: loc.id,
+            isOnBreak: log.action_type === 'BREAK_START',
           });
         }
       });
@@ -202,6 +218,18 @@ export default function AdminPage() {
 
   const forceCheckOut = async (worker: ActiveWorker) => {
     if (!confirm(`${worker.fullName} için manuel çıkış kaydı oluşturulsun mu?`)) return;
+
+    if (worker.isOnBreak) {
+      await supabase.from('attendance_logs').insert({
+        user_id: worker.userId,
+        location_id: worker.locationId,
+        action_type: 'BREAK_END',
+        scanned_lat: 0,
+        scanned_lng: 0,
+        distance_meters: 0,
+      });
+    }
+
     await supabase.from('attendance_logs').insert({
       user_id: worker.userId,
       location_id: worker.locationId,
@@ -213,7 +241,7 @@ export default function AdminPage() {
     fetchLiveLocations();
   };
 
-  // 2. PUANTAJ & GEÇ KALMA / FAZLA MESAİ / AYLIK ÖZET
+  // 2. PUANTAJ & GEÇ KALMA / MOLA / FAZLA MESAİ / AYLIK ÖZET
   const fetchPuantajReport = async () => {
     setLoadingReport(true);
     const startISO = new Date(`${startDate}T00:00:00`).toISOString();
@@ -222,7 +250,7 @@ export default function AdminPage() {
     let query = supabase
       .from('attendance_logs')
       .select(
-        'id, user_id, location_id, action_type, created_at, profiles(full_name, shift_start, shift_end), locations(name, shift_start, shift_end, grace_minutes)'
+        'id, user_id, location_id, action_type, created_at, profiles(full_name, shift_start, shift_end), locations(name, shift_start, shift_end, grace_minutes, daily_break_minutes)'
       )
       .gte('created_at', startISO)
       .lte('created_at', endISO)
@@ -252,6 +280,7 @@ export default function AdminPage() {
       const effStart = prof?.shift_start || loc?.shift_start || '09:00';
       const effEnd = prof?.shift_end || loc?.shift_end || '18:00';
       const grace = loc?.grace_minutes ?? 10;
+      const allowedBreak = loc?.daily_break_minutes ?? 45;
 
       if (log.action_type === 'IN') {
         if (openShifts.has(log.user_id)) {
@@ -267,6 +296,8 @@ export default function AdminPage() {
             outTime: null,
             durationText: 'Çıkış Eksik',
             durationMinutes: 0,
+            breakMinutes: prev.accumulatedBreakMins || 0,
+            breakExcessMinutes: 0,
             lateMinutes: prev.lateMinutes,
             overtimeMinutes: 0,
             statusBadge: 'missing',
@@ -288,26 +319,56 @@ export default function AdminPage() {
           expectedShift: `${effStart}-${effEnd}`,
           effStart,
           effEnd,
+          allowedBreak,
           lateMinutes: lateMins,
+          accumulatedBreakMins: 0,
+          activeBreakStart: null,
         });
+      } else if (log.action_type === 'BREAK_START') {
+        const currentShift = openShifts.get(log.user_id);
+        if (currentShift && !currentShift.activeBreakStart) {
+          currentShift.activeBreakStart = new Date(log.created_at).getTime();
+        }
+      } else if (log.action_type === 'BREAK_END') {
+        const currentShift = openShifts.get(log.user_id);
+        if (currentShift && currentShift.activeBreakStart) {
+          const bDiff = Math.max(
+            0,
+            Math.round((new Date(log.created_at).getTime() - currentShift.activeBreakStart) / 60000)
+          );
+          currentShift.accumulatedBreakMins += bDiff;
+          currentShift.activeBreakStart = null;
+        }
       } else if (log.action_type === 'OUT') {
         const matchingIn = openShifts.get(log.user_id);
         if (matchingIn) {
+          if (matchingIn.activeBreakStart) {
+            const bDiff = Math.max(
+              0,
+              Math.round((new Date(log.created_at).getTime() - matchingIn.activeBreakStart) / 60000)
+            );
+            matchingIn.accumulatedBreakMins += bDiff;
+            matchingIn.activeBreakStart = null;
+          }
+
           const diffMs = new Date(log.created_at).getTime() - new Date(matchingIn.created_at).getTime();
-          const totalMins = Math.max(0, Math.floor(diffMs / 60000));
+          const grossMins = Math.max(0, Math.floor(diffMs / 60000));
+          const breakMins = matchingIn.accumulatedBreakMins || 0;
+          const netMins = Math.max(0, grossMins - breakMins);
+          const breakExcess = Math.max(0, breakMins - (matchingIn.allowedBreak ?? 45));
 
           const sMins = timeToMinutes(matchingIn.effStart);
           const eMins = timeToMinutes(matchingIn.effEnd);
           let overtimeMins = 0;
           if (sMins !== null && eMins !== null) {
             const expectedDuration = eMins >= sMins ? eMins - sMins : 24 * 60 - sMins + eMins;
-            if (totalMins > expectedDuration + 15) {
-              overtimeMins = totalMins - expectedDuration;
+            if (netMins > expectedDuration + 15) {
+              overtimeMins = netMins - expectedDuration;
             }
           }
 
           let badge: ShiftSummary['statusBadge'] = 'normal';
-          if (matchingIn.lateMinutes > 0) badge = 'late';
+          if (matchingIn.lateMinutes > 0 || breakExcess > 0) badge = 'late';
           else if (overtimeMins > 0) badge = 'overtime';
 
           completedShifts.push({
@@ -319,8 +380,10 @@ export default function AdminPage() {
             expectedShift: matchingIn.expectedShift,
             inTime: new Date(matchingIn.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
             outTime: new Date(log.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
-            durationText: formatDuration(totalMins),
-            durationMinutes: totalMins,
+            durationText: formatDuration(netMins),
+            durationMinutes: netMins,
+            breakMinutes: breakMins,
+            breakExcessMinutes: breakExcess,
             lateMinutes: matchingIn.lateMinutes,
             overtimeMinutes: overtimeMins,
             statusBadge: badge,
@@ -330,7 +393,6 @@ export default function AdminPage() {
       }
     });
 
-    // Hâlâ içeride olan aktif vardiyalar için şu ana kadar geçen süreyi hesapla
     const nowMs = Date.now();
     const sixteenHoursMs = 16 * 60 * 60 * 1000;
 
@@ -338,7 +400,11 @@ export default function AdminPage() {
       const checkInMs = new Date(openLog.created_at).getTime();
       const elapsedMs = Math.max(0, nowMs - checkInMs);
       const isStillActive = elapsedMs <= sixteenHoursMs;
-      const activeMinutes = isStillActive ? Math.floor(elapsedMs / 60000) : 0;
+      let ongoingBreak = openLog.accumulatedBreakMins || 0;
+      if (openLog.activeBreakStart && isStillActive) {
+        ongoingBreak += Math.max(0, Math.round((nowMs - openLog.activeBreakStart) / 60000));
+      }
+      const activeMinutes = isStillActive ? Math.max(0, Math.floor(elapsedMs / 60000) - ongoingBreak) : 0;
 
       completedShifts.push({
         id: openLog.id,
@@ -349,8 +415,10 @@ export default function AdminPage() {
         expectedShift: openLog.expectedShift,
         inTime: new Date(openLog.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
         outTime: isStillActive ? 'İçeride' : null,
-        durationText: isStillActive ? `${formatDuration(activeMinutes)} (Devam Ediyor)` : 'Çıkış Eksik',
+        durationText: isStillActive ? `${formatDuration(activeMinutes)} (Aktif)` : 'Çıkış Eksik',
         durationMinutes: activeMinutes,
+        breakMinutes: ongoingBreak,
+        breakExcessMinutes: Math.max(0, ongoingBreak - (openLog.allowedBreak ?? 45)),
         lateMinutes: openLog.lateMinutes,
         overtimeMinutes: 0,
         statusBadge: isStillActive ? 'open' : 'missing',
@@ -359,7 +427,6 @@ export default function AdminPage() {
 
     setShifts(completedShifts.reverse());
 
-    // Personel bazlı aylık özet hesapla
     const summaryMap = new Map<string, MonthlyUserSummary & { uniqueDates: Set<string> }>();
 
     completedShifts.forEach((s) => {
@@ -369,6 +436,7 @@ export default function AdminPage() {
           staffName: s.staffName,
           daysWorked: 0,
           totalMinutes: 0,
+          totalBreakMinutes: 0,
           totalLateMinutes: 0,
           totalOvertimeMinutes: 0,
           leaveDays: 0,
@@ -379,6 +447,7 @@ export default function AdminPage() {
       entry.uniqueDates.add(s.date);
       entry.daysWorked = entry.uniqueDates.size;
       entry.totalMinutes += s.durationMinutes;
+      entry.totalBreakMinutes += s.breakMinutes;
       entry.totalLateMinutes += s.lateMinutes;
       entry.totalOvertimeMinutes += s.overtimeMinutes;
     });
@@ -391,6 +460,7 @@ export default function AdminPage() {
           staffName: prof?.full_name || 'Personel',
           daysWorked: 0,
           totalMinutes: 0,
+          totalBreakMinutes: 0,
           totalLateMinutes: 0,
           totalOvertimeMinutes: 0,
           leaveDays: 0,
@@ -405,7 +475,18 @@ export default function AdminPage() {
   };
 
   const exportPuantajCSV = () => {
-    const headers = ['Tarih', 'Personel', 'Sube', 'Vardiya', 'Giris', 'Cikis', 'Net_Sure', 'Gec_Kalma', 'Fazla_Mesai'];
+    const headers = [
+      'Tarih',
+      'Personel',
+      'Sube',
+      'Vardiya',
+      'Giris',
+      'Cikis',
+      'Mola',
+      'Net_Sure',
+      'Gec_Kalma',
+      'Fazla_Mesai',
+    ];
     const rows = shifts.map((s) => [
       s.date,
       s.staffName,
@@ -413,9 +494,10 @@ export default function AdminPage() {
       s.expectedShift,
       s.inTime,
       s.outTime || 'Çıkış Yok',
+      formatDuration(s.breakMinutes),
       s.durationText,
-      s.lateMinutes > 0 ? formatDuration(s.lateMinutes) : '0 dakika',
-      s.overtimeMinutes > 0 ? formatDuration(s.overtimeMinutes) : '0 dakika',
+      s.lateMinutes > 0 ? formatDuration(s.lateMinutes) : '0 dk',
+      s.overtimeMinutes > 0 ? formatDuration(s.overtimeMinutes) : '0 dk',
     ]);
 
     const csvContent =
@@ -430,7 +512,7 @@ export default function AdminPage() {
     document.body.removeChild(link);
   };
 
-  // 3. İZİN YÖNETİMİ
+  // 3. İZİN YÖNETİMİ & PERSONEL TALEPLERİ
   const fetchLeaves = async () => {
     const { data } = await supabase
       .from('leaves')
@@ -438,6 +520,50 @@ export default function AdminPage() {
       .order('leave_date', { ascending: false })
       .limit(50);
     if (data) setLeavesList(data);
+  };
+
+  const fetchPendingLeaveRequests = async () => {
+    const { data } = await supabase
+      .from('leave_requests')
+      .select('*, profiles(full_name, username)')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false });
+    if (data) setPendingRequests(data);
+  };
+
+  const handleLeaveRequestAction = async (req: any, decision: 'approved' | 'rejected') => {
+    const { error } = await supabase
+      .from('leave_requests')
+      .update({ status: decision })
+      .eq('id', req.id);
+
+    if (error) {
+      alert('İşlem sırasında hata oluştu.');
+      return;
+    }
+
+    // Onaylandıysa başlangıç-bitiş arasındaki günleri otomatik puantaj izin tablosuna (leaves) ekle
+    if (decision === 'approved') {
+      const start = new Date(req.start_date);
+      const end = new Date(req.end_date);
+      const rowsToInsert: any[] = [];
+
+      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        rowsToInsert.push({
+          user_id: req.user_id,
+          leave_date: d.toISOString().slice(0, 10),
+          leave_type: req.leave_type,
+          note: req.reason || 'Personel talebiyle onaylandı',
+        });
+      }
+
+      if (rowsToInsert.length > 0) {
+        await supabase.from('leaves').insert(rowsToInsert);
+      }
+    }
+
+    fetchPendingLeaveRequests();
+    fetchLeaves();
   };
 
   const handleAddLeave = async (e: React.FormEvent) => {
@@ -462,7 +588,7 @@ export default function AdminPage() {
     fetchLeaves();
   };
 
-  // 4. ŞUBE YÖNETİMİ & MESAİ SAATLERİ
+  // 4. ŞUBE YÖNETİMİ, MESAİ & MOLA HAKKI
   const fetchLocationsList = async () => {
     const { data } = await supabase.from('locations').select('*').order('name');
     if (data) setLocationsList(data);
@@ -483,10 +609,11 @@ export default function AdminPage() {
         shift_start: loc.shift_start || '09:00',
         shift_end: loc.shift_end || '18:00',
         grace_minutes: parseInt(loc.grace_minutes ?? 10, 10),
+        daily_break_minutes: parseInt(loc.daily_break_minutes ?? 45, 10),
       })
       .eq('id', loc.id);
 
-    if (!error) alert(`${loc.name} şube ve mesai ayarları kaydedildi.`);
+    if (!error) alert(`${loc.name} şube, mesai ve mola ayarları kaydedildi.`);
   };
 
   const handleAddLocation = async (e: React.FormEvent) => {
@@ -500,6 +627,7 @@ export default function AdminPage() {
       shift_start: newLocStart,
       shift_end: newLocEnd,
       grace_minutes: 10,
+      daily_break_minutes: parseInt(newLocBreak || '45', 10),
     });
 
     if (!error) {
@@ -508,6 +636,7 @@ export default function AdminPage() {
       setNewLocLat('');
       setNewLocLng('');
       setNewLocRadius('75');
+      setNewLocBreak('45');
       fetchLocationsList();
       fetchLiveLocations();
     } else {
@@ -515,7 +644,7 @@ export default function AdminPage() {
     }
   };
 
-  // 5. PERSONEL YÖNETİMİ & KİŞİYE ÖZEL MESAİ SAATLERİ
+  // 5. PERSONEL YÖNETİMİ
   const fetchStaff = async () => {
     const { data } = await supabase
       .from('profiles')
@@ -620,7 +749,7 @@ export default function AdminPage() {
             </button>
             <div>
               <h1 className="text-xl font-bold">Yönetici Paneli</h1>
-              <p className="text-xs text-slate-400">Canlı takip, vardiya analizi, izin ve şube yönetimi</p>
+              <p className="text-xs text-slate-400">Canlı takip, vardiya, mola, izin ve şube yönetimi</p>
             </div>
           </div>
 
@@ -644,11 +773,16 @@ export default function AdminPage() {
               </button>
               <button
                 onClick={() => setActiveTab('leaves')}
-                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition ${
+                className={`relative flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition ${
                   activeTab === 'leaves' ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-white'
                 }`}
               >
                 <FileCheck2 className="w-4 h-4" /> İzin & Rapor
+                {pendingRequests.length > 0 && (
+                  <span className="ml-1 px-1.5 py-0.2 bg-white text-rose-600 text-[10px] font-extrabold rounded-full">
+                    {pendingRequests.length}
+                  </span>
+                )}
               </button>
               <button
                 onClick={() => setActiveTab('locations')}
@@ -671,7 +805,7 @@ export default function AdminPage() {
             <button
               onClick={() => {
                 clearSessionUser();
-                router.push('/login');
+                window.location.href = '/login';
               }}
               className="p-2.5 bg-slate-900 border border-slate-800 rounded-xl text-slate-400 hover:text-white"
               title="Çıkış Yap"
@@ -733,9 +867,20 @@ export default function AdminPage() {
                             className="flex items-center justify-between bg-slate-800/50 border border-slate-700/60 px-3.5 py-2.5 rounded-xl"
                           >
                             <div className="flex items-center gap-2.5">
-                              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+                              <span
+                                className={`w-2.5 h-2.5 rounded-full animate-pulse ${
+                                  worker.isOnBreak ? 'bg-amber-400' : 'bg-emerald-400'
+                                }`}
+                              />
                               <div>
-                                <p className="text-sm font-semibold text-white">{worker.fullName}</p>
+                                <div className="flex items-center gap-2">
+                                  <p className="text-sm font-semibold text-white">{worker.fullName}</p>
+                                  {worker.isOnBreak && (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                      <Coffee className="w-2.5 h-2.5" /> Molada
+                                    </span>
+                                  )}
+                                </div>
                                 <p className="text-xs text-slate-400 font-mono">@{worker.username}</p>
                               </div>
                             </div>
@@ -765,10 +910,9 @@ export default function AdminPage() {
           </>
         )}
 
-        {/* SEKME 2: PUANTAJ & GEÇ KALMA / FAZLA MESAİ RAPORU */}
+        {/* SEKME 2: PUANTAJ & GEÇ KALMA / MOLA / FAZLA MESAİ RAPORU */}
         {activeTab === 'report' && (
           <div className="space-y-6">
-            {/* Filtreler */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-wrap items-end justify-between gap-4">
               <div className="flex flex-wrap items-end gap-3">
                 <div>
@@ -822,7 +966,6 @@ export default function AdminPage() {
               </div>
             </div>
 
-            {/* Personel Bazlı Aylık Özet Tablosu */}
             {monthlySummaries.length > 0 && (
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
                 <h2 className="text-sm font-bold text-slate-200 mb-3">
@@ -842,9 +985,15 @@ export default function AdminPage() {
                       </div>
                       <div className="text-xs text-slate-300 space-y-1">
                         <div className="flex justify-between">
-                          <span className="text-slate-400">Toplam Süre:</span>
+                          <span className="text-slate-400">Net Çalışma Süresi:</span>
                           <span className="font-bold text-emerald-400">
                             {formatDuration(m.totalMinutes)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Toplam Mola:</span>
+                          <span className="text-amber-300 font-medium">
+                            {formatDuration(m.totalBreakMinutes)}
                           </span>
                         </div>
                         <div className="flex justify-between">
@@ -872,7 +1021,6 @@ export default function AdminPage() {
               </div>
             )}
 
-            {/* Günlük Detay Tablosu */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
@@ -884,6 +1032,7 @@ export default function AdminPage() {
                       <th className="px-4 py-3">Vardiya</th>
                       <th className="px-4 py-3">Giriş</th>
                       <th className="px-4 py-3">Çıkış</th>
+                      <th className="px-4 py-3">Mola</th>
                       <th className="px-4 py-3">Net Süre</th>
                       <th className="px-4 py-3">Durum Analizi</th>
                     </tr>
@@ -891,13 +1040,13 @@ export default function AdminPage() {
                   <tbody className="divide-y divide-slate-800">
                     {loadingReport ? (
                       <tr>
-                        <td colSpan={8} className="px-4 py-8 text-center text-slate-400">
+                        <td colSpan={9} className="px-4 py-8 text-center text-slate-400">
                           Hesaplanıyor...
                         </td>
                       </tr>
                     ) : shifts.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="px-4 py-8 text-center text-slate-400">
+                        <td colSpan={9} className="px-4 py-8 text-center text-slate-400">
                           Seçilen tarih aralığında vardiya kaydı bulunamadı.
                         </td>
                       </tr>
@@ -910,6 +1059,7 @@ export default function AdminPage() {
                           <td className="px-4 py-3 text-xs font-mono text-slate-400">{s.expectedShift}</td>
                           <td className="px-4 py-3 text-emerald-400 font-mono">{s.inTime}</td>
                           <td className="px-4 py-3 text-amber-400 font-mono">{s.outTime || '-'}</td>
+                          <td className="px-4 py-3 text-xs text-slate-300">{formatDuration(s.breakMinutes)}</td>
                           <td className="px-4 py-3 font-semibold text-white">{s.durationText}</td>
                           <td className="px-4 py-3 text-xs">
                             <div className="flex flex-wrap gap-1">
@@ -918,16 +1068,24 @@ export default function AdminPage() {
                                   {formatDuration(s.lateMinutes)} Geç
                                 </span>
                               )}
+                              {s.breakExcessMinutes > 0 && (
+                                <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold">
+                                  +{formatDuration(s.breakExcessMinutes)} Mola Aşımı
+                                </span>
+                              )}
                               {s.overtimeMinutes > 0 && (
                                 <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-semibold">
                                   {formatDuration(s.overtimeMinutes)} Mesai
                                 </span>
                               )}
-                              {s.lateMinutes === 0 && s.overtimeMinutes === 0 && s.statusBadge === 'normal' && (
-                                <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400">
-                                  Zamanında
-                                </span>
-                              )}
+                              {s.lateMinutes === 0 &&
+                                s.breakExcessMinutes === 0 &&
+                                s.overtimeMinutes === 0 &&
+                                s.statusBadge === 'normal' && (
+                                  <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400">
+                                    Zamanında
+                                  </span>
+                                )}
                             </div>
                           </td>
                         </tr>
@@ -942,128 +1100,183 @@ export default function AdminPage() {
 
         {/* SEKME 3: İZİN & RAPOR YÖNETİMİ */}
         {activeTab === 'leaves' && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <form
-              onSubmit={handleAddLeave}
-              className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 h-fit"
-            >
-              <h2 className="text-lg font-bold flex items-center gap-2">
-                <FileCheck2 className="w-5 h-5 text-rose-400" /> İzin / Rapor İşle
-              </h2>
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">Personel Seçin</label>
-                <select
-                  required
-                  value={leaveUserId}
-                  onChange={(e) => setLeaveUserId(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
-                >
-                  <option value="">-- Personel Seç --</option>
-                  {staffList.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.full_name} (@{p.username})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">İzin Tarihi</label>
-                <input
-                  type="date"
-                  required
-                  value={leaveDate}
-                  onChange={(e) => setLeaveDate(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">İzin Türü</label>
-                <select
-                  value={leaveType}
-                  onChange={(e) => setLeaveType(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
-                >
-                  <option value="Yıllık İzin">Yıllık İzin</option>
-                  <option value="Raporlu">Raporlu (Sağlık)</option>
-                  <option value="Ücretsiz İzin">Ücretsiz İzin</option>
-                  <option value="İdari İzin">İdari İzin</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">Açıklama (Opsiyonel)</label>
-                <input
-                  type="text"
-                  value={leaveNote}
-                  onChange={(e) => setLeaveNote(e.target.value)}
-                  placeholder="Örn: Doktor raporu teslim edildi"
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
-                />
-              </div>
-              <button
-                type="submit"
-                className="w-full py-2.5 bg-rose-600 hover:bg-rose-500 rounded-lg text-sm font-semibold"
-              >
-                İzin Kaydını Ekle
-              </button>
-            </form>
-
-            <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-              <div className="p-4 border-b border-slate-800">
-                <h2 className="font-semibold text-sm">Kayıtlı İzin ve Raporlar</h2>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase">
-                    <tr>
-                      <th className="px-4 py-3">Tarih</th>
-                      <th className="px-4 py-3">Personel</th>
-                      <th className="px-4 py-3">İzin Türü</th>
-                      <th className="px-4 py-3">Not</th>
-                      <th className="px-4 py-3 text-right">Sil</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800">
-                    {leavesList.length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
-                          Henüz izin kaydı girilmemiş.
-                        </td>
-                      </tr>
-                    ) : (
-                      leavesList.map((lv) => (
-                        <tr key={lv.id}>
-                          <td className="px-4 py-3">{new Date(lv.leave_date).toLocaleDateString('tr-TR')}</td>
-                          <td className="px-4 py-3 font-medium">{lv.profiles?.full_name}</td>
-                          <td className="px-4 py-3">
-                            <span className="px-2 py-0.5 rounded text-xs bg-rose-500/20 text-rose-300 font-semibold">
-                              {lv.leave_type}
+          <div className="space-y-6">
+            {/* Personellerden Gelen Bekleyen İzin Talepleri */}
+            {pendingRequests.length > 0 && (
+              <div className="bg-rose-950/20 border border-rose-500/40 rounded-2xl p-5">
+                <h2 className="text-sm font-bold text-rose-300 mb-3 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4" /> Personellerden Gelen Onay Bekleyen İzin Talepleri ({pendingRequests.length})
+                </h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {pendingRequests.map((req) => {
+                    const prof = Array.isArray(req.profiles) ? req.profiles[0] : req.profiles;
+                    return (
+                      <div
+                        key={req.id}
+                        className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col justify-between gap-3"
+                      >
+                        <div>
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-sm text-white">{prof?.full_name || 'Personel'}</span>
+                            <span className="px-2 py-0.5 rounded text-[11px] bg-amber-500/20 text-amber-300 font-semibold">
+                              {req.leave_type}
                             </span>
-                          </td>
-                          <td className="px-4 py-3 text-slate-400 text-xs">{lv.note || '-'}</td>
-                          <td className="px-4 py-3 text-right">
-                            <button
-                              onClick={() => deleteLeave(lv.id)}
-                              className="text-slate-400 hover:text-red-400"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                          </div>
+                          <p className="text-xs text-slate-300 mt-1.5">
+                            Tarih:{' '}
+                            <span className="font-semibold">
+                              {new Date(req.start_date).toLocaleDateString('tr-TR')} –{' '}
+                              {new Date(req.end_date).toLocaleDateString('tr-TR')}
+                            </span>
+                          </p>
+                          {req.reason && (
+                            <p className="text-xs text-slate-400 mt-1 italic">"{req.reason}"</p>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800">
+                          <button
+                            onClick={() => handleLeaveRequestAction(req, 'approved')}
+                            className="py-1.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-xs font-semibold flex items-center justify-center gap-1"
+                          >
+                            <Check className="w-3.5 h-3.5" /> Onayla
+                          </button>
+                          <button
+                            onClick={() => handleLeaveRequestAction(req, 'rejected')}
+                            className="py-1.5 bg-red-600/20 hover:bg-red-600/40 text-red-300 border border-red-500/30 rounded-lg text-xs font-semibold flex items-center justify-center gap-1"
+                          >
+                            <XCircle className="w-3.5 h-3.5" /> Reddet
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <form
+                onSubmit={handleAddLeave}
+                className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 h-fit"
+              >
+                <h2 className="text-lg font-bold flex items-center gap-2">
+                  <FileCheck2 className="w-5 h-5 text-rose-400" /> Manuel İzin / Rapor İşle
+                </h2>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Personel Seçin</label>
+                  <select
+                    required
+                    value={leaveUserId}
+                    onChange={(e) => setLeaveUserId(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
+                  >
+                    <option value="">-- Personel Seç --</option>
+                    {staffList.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.full_name} (@{p.username})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">İzin Tarihi</label>
+                  <input
+                    type="date"
+                    required
+                    value={leaveDate}
+                    onChange={(e) => setLeaveDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">İzin Türü</label>
+                  <select
+                    value={leaveType}
+                    onChange={(e) => setLeaveType(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
+                  >
+                    <option value="Yıllık İzin">Yıllık İzin</option>
+                    <option value="Raporlu">Raporlu (Sağlık)</option>
+                    <option value="Ücretsiz İzin">Ücretsiz İzin</option>
+                    <option value="İdari İzin">İdari İzin</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Açıklama (Opsiyonel)</label>
+                  <input
+                    type="text"
+                    value={leaveNote}
+                    onChange={(e) => setLeaveNote(e.target.value)}
+                    placeholder="Örn: Doktor raporu teslim edildi"
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full py-2.5 bg-rose-600 hover:bg-rose-500 rounded-lg text-sm font-semibold"
+                >
+                  İzin Kaydını Ekle
+                </button>
+              </form>
+
+              <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+                <div className="p-4 border-b border-slate-800">
+                  <h2 className="font-semibold text-sm">Kayıtlı ve Onaylanmış İzinler</h2>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase">
+                      <tr>
+                        <th className="px-4 py-3">Tarih</th>
+                        <th className="px-4 py-3">Personel</th>
+                        <th className="px-4 py-3">İzin Türü</th>
+                        <th className="px-4 py-3">Not</th>
+                        <th className="px-4 py-3 text-right">Sil</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {leavesList.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                            Henüz izin kaydı girilmemiş.
                           </td>
                         </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+                      ) : (
+                        leavesList.map((lv) => (
+                          <tr key={lv.id}>
+                            <td className="px-4 py-3">{new Date(lv.leave_date).toLocaleDateString('tr-TR')}</td>
+                            <td className="px-4 py-3 font-medium">{lv.profiles?.full_name}</td>
+                            <td className="px-4 py-3">
+                              <span className="px-2 py-0.5 rounded text-xs bg-rose-500/20 text-rose-300 font-semibold">
+                                {lv.leave_type}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-slate-400 text-xs">{lv.note || '-'}</td>
+                            <td className="px-4 py-3 text-right">
+                              <button
+                                onClick={() => deleteLeave(lv.id)}
+                                className="text-slate-400 hover:text-red-400"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* SEKME 4: ŞUBELER, MESAİ SAATLERİ & QR YAZDIRMA */}
+        {/* SEKME 4: ŞUBELER, MESAİ, MOLA HAKKI & QR YAZDIRMA */}
         {activeTab === 'locations' && (
           <div className="space-y-6">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
               <div className="p-4 border-b border-slate-800">
-                <h2 className="font-semibold text-sm">Şube Koordinatları, Mesai Saatleri ve QR Kodları</h2>
+                <h2 className="font-semibold text-sm">Şube Koordinatları, Mesai / Mola Hakları ve QR Kodları</h2>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
@@ -1073,9 +1286,10 @@ export default function AdminPage() {
                       <th className="px-3 py-3">Enlem</th>
                       <th className="px-3 py-3">Boylam</th>
                       <th className="px-3 py-3">Yarıçap(m)</th>
-                      <th className="px-3 py-3">Mesai Başlangıç</th>
-                      <th className="px-3 py-3">Mesai Bitiş</th>
+                      <th className="px-3 py-3">Başlangıç</th>
+                      <th className="px-3 py-3">Bitiş</th>
                       <th className="px-3 py-3">Esneme(dk)</th>
+                      <th className="px-3 py-3">Mola Hakkı(dk)</th>
                       <th className="px-3 py-3 text-right">İşlem</th>
                     </tr>
                   </thead>
@@ -1087,7 +1301,7 @@ export default function AdminPage() {
                             type="text"
                             value={loc.name}
                             onChange={(e) => updateLocationField(loc.id, 'name', e.target.value)}
-                            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm w-40"
+                            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm w-36"
                           />
                         </td>
                         <td className="px-3 py-2.5">
@@ -1135,7 +1349,16 @@ export default function AdminPage() {
                             type="number"
                             value={loc.grace_minutes ?? 10}
                             onChange={(e) => updateLocationField(loc.id, 'grace_minutes', e.target.value)}
-                            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm w-16"
+                            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm w-14"
+                          />
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <input
+                            type="number"
+                            value={loc.daily_break_minutes ?? 45}
+                            onChange={(e) => updateLocationField(loc.id, 'daily_break_minutes', e.target.value)}
+                            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm w-16 text-amber-300 font-semibold"
+                            title="Günlük izin verilen toplam mola süresi (dakika)"
                           />
                         </td>
                         <td className="px-3 py-2.5 text-right flex items-center justify-end gap-1.5">
@@ -1163,7 +1386,7 @@ export default function AdminPage() {
             {/* Yeni Şube Ekleme Formu */}
             <form
               onSubmit={handleAddLocation}
-              className="bg-slate-900 border border-slate-800 rounded-2xl p-5 grid grid-cols-1 md:grid-cols-8 gap-3 items-end"
+              className="bg-slate-900 border border-slate-800 rounded-2xl p-5 grid grid-cols-1 md:grid-cols-9 gap-3 items-end"
             >
               <div className="md:col-span-2">
                 <label className="block text-xs text-slate-400 mb-1">Yeni Şube Adı</label>
@@ -1224,6 +1447,15 @@ export default function AdminPage() {
                   type="time"
                   value={newLocEnd}
                   onChange={(e) => setNewLocEnd(e.target.value)}
+                  className="w-full px-2 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Mola (dk)</label>
+                <input
+                  type="number"
+                  value={newLocBreak}
+                  onChange={(e) => setNewLocBreak(e.target.value)}
                   className="w-full px-2 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs"
                 />
               </div>

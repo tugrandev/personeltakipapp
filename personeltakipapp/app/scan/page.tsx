@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState, Suspense } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
+import { useEffect, useState, useRef, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import { getSessionUser } from '@/lib/session';
 import { calculateDistanceMeters } from '@/lib/geo';
@@ -9,14 +9,18 @@ import { CheckCircle2, XCircle, Loader2, Home, QrCode } from 'lucide-react';
 
 function ScanProcessor() {
   const searchParams = useSearchParams();
-  const router = useRouter();
   const locSecret = searchParams.get('loc');
 
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [title, setTitle] = useState('Konum ve QR doğrulanıyor...');
   const [detail, setDetail] = useState('Lütfen konum izni istendiğinde onay verin.');
 
+  // React StrictMode veya çift render kaynaklı ikiz kayıtları engelleyen kilit
+  const hasStartedRef = useRef(false);
+
   useEffect(() => {
+    if (hasStartedRef.current) return;
+    hasStartedRef.current = true;
     processScan();
   }, [locSecret]);
 
@@ -47,7 +51,7 @@ function ScanProcessor() {
 
     const user = getSessionUser();
     if (!user) {
-      router.push(`/login?redirect=/scan?loc=${encodeURIComponent(locSecret)}`);
+      window.location.href = `/login?redirect=/scan?loc=${encodeURIComponent(locSecret)}`;
       return;
     }
 
@@ -95,16 +99,33 @@ function ScanProcessor() {
 
       const { data: recentLogs } = await supabase
         .from('attendance_logs')
-        .select('action_type')
+        .select('action_type, created_at')
         .eq('user_id', user.id)
         .gte('created_at', sixteenHoursAgo)
         .order('created_at', { ascending: false })
         .limit(1);
 
-      const nextAction =
-        recentLogs && recentLogs.length > 0 && recentLogs[0].action_type === 'IN'
-          ? 'OUT'
-          : 'IN';
+      const latestLog = recentLogs && recentLogs.length > 0 ? recentLogs[0] : null;
+
+      // Son 90 saniye içinde zaten bir GİRİŞ veya ÇIKIŞ kaydı varsa mükerrer kayıt atma
+      if (
+        latestLog &&
+        (latestLog.action_type === 'IN' || latestLog.action_type === 'OUT') &&
+        Date.now() - new Date(latestLog.created_at).getTime() < 90 * 1000
+      ) {
+        const existingTimeStr = new Date(latestLog.created_at).toLocaleTimeString('tr-TR', {
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        setStatus('success');
+        setTitle(`${latestLog.action_type === 'IN' ? 'GİRİŞ' : 'ÇIKIŞ'} ZATEN KAYDEDİLDİ (${existingTimeStr})`);
+        setDetail(`${location.name} • Konum doğrulandı (${distance}m)`);
+        return;
+      }
+
+      // Son hareket 'IN' veya 'BREAK_END' ise (yani içerideyse) sıradaki hareket 'OUT' olmalı
+      const isInside = latestLog && (latestLog.action_type === 'IN' || latestLog.action_type === 'BREAK_END');
+      const nextAction = isInside ? 'OUT' : 'IN';
 
       const { error: insertError } = await supabase.from('attendance_logs').insert({
         user_id: user.id,
@@ -148,7 +169,9 @@ function ScanProcessor() {
           <h1 className="text-2xl font-bold text-emerald-400">{title}</h1>
           <p className="text-sm text-slate-300">{detail}</p>
           <button
-            onClick={() => router.push('/')}
+            onClick={() => {
+              window.location.href = '/';
+            }}
             className="mt-4 w-full py-3 bg-slate-800 hover:bg-slate-700 rounded-xl text-sm font-medium flex items-center justify-center gap-2"
           >
             <Home className="w-4 h-4" /> Ana Sayfaya Dön
@@ -163,10 +186,12 @@ function ScanProcessor() {
           <p className="text-sm text-slate-300">{detail}</p>
           <button
             type="button"
-            onClick={() => router.push('/?scan=1')}
+            onClick={() => {
+              window.location.href = '/';
+            }}
             className="mt-4 w-full py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm font-semibold flex items-center justify-center gap-2"
           >
-            <QrCode className="w-4 h-4" /> Tekrar QR Okut
+            <QrCode className="w-4 h-4" /> Ana Sayfaya Dön ve Tekrar Okut
           </button>
         </div>
       )}
