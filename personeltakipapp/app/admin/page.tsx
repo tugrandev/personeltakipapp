@@ -90,6 +90,7 @@ export default function AdminPage() {
   const [adminUser, setAdminUser] = useState<AppUser | null>(null);
   const [activeTab, setActiveTab] = useState<'live' | 'report' | 'leaves' | 'locations' | 'staff'>('live');
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const router = useRouter();
 
   // Canlı durum
@@ -172,7 +173,7 @@ export default function AdminPage() {
     }
   }, [activeTab, startDate, endDate, selectedLocFilter]);
 
-  // Bulunulan aktif sekmeye göre tüm verileri yenileyen merkezi fonksiyon
+  // Ana Yenile Butonu: Bulunulan aktif sekmeyi günceller
   const handleRefreshActiveTab = async () => {
     setIsRefreshingAll(true);
     try {
@@ -190,6 +191,11 @@ export default function AdminPage() {
     } finally {
       setTimeout(() => setIsRefreshingAll(false), 300);
     }
+  };
+
+  const confirmLogout = () => {
+    clearSessionUser();
+    window.location.href = '/login';
   };
 
   const timeToMinutes = (hhmm?: string | null): number | null => {
@@ -605,7 +611,6 @@ export default function AdminPage() {
 
       if (error) throw error;
 
-      // Onaylandıysa başlangıç-bitiş günlerini otomatik puantaj izin tablosuna işle
       if (decision === 'approved') {
         const start = new Date(req.start_date);
         const end = new Date(req.end_date);
@@ -871,23 +876,21 @@ export default function AdminPage() {
               </button>
             </div>
 
-            {/* Merkezi Sekme Yenileme Butonu */}
+            {/* TEK MERKEZİ YENİLEME BUTONU */}
             <button
               onClick={handleRefreshActiveTab}
               disabled={isRefreshingAll}
-              className="flex items-center gap-1.5 px-3 py-2.5 bg-slate-900 border border-slate-800 hover:bg-slate-800 rounded-xl text-xs font-medium text-emerald-400 transition"
-              title="Aktif Sayfayı Yenile"
+              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-900 border border-slate-800 hover:bg-slate-800 rounded-xl text-xs font-semibold text-emerald-400 transition"
+              title="Sayfayı Yenile"
             >
               <RefreshCw className={`w-4 h-4 ${isRefreshingAll ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">Yenile</span>
+              <span>Yenile</span>
             </button>
 
+            {/* ÇIKIŞ YAP BUTONU (Onay Modalı Açar) */}
             <button
-              onClick={() => {
-                clearSessionUser();
-                window.location.href = '/login';
-              }}
-              className="p-2.5 bg-slate-900 border border-slate-800 rounded-xl text-slate-400 hover:text-red-400 transition"
+              onClick={() => setShowLogoutConfirm(true)}
+              className="p-2.5 bg-slate-900 border border-slate-800 hover:border-red-500/40 hover:bg-red-950/20 rounded-xl text-slate-400 hover:text-red-400 transition"
               title="Çıkış Yap"
             >
               <LogOut className="w-4 h-4" />
@@ -898,17 +901,9 @@ export default function AdminPage() {
         {/* SEKME 1: CANLI DURUM */}
         {activeTab === 'live' && (
           <>
-            <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-              <div className="text-sm text-slate-300">
-                Şu an işyerlerinde aktif toplam personel:{' '}
-                <span className="font-bold text-emerald-400">{totalActiveCount} kişi</span>
-              </div>
-              <button
-                onClick={fetchLiveLocations}
-                className="flex items-center gap-1.5 px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm hover:bg-slate-800"
-              >
-                <RefreshCw className={`w-4 h-4 ${loadingLive ? 'animate-spin' : ''}`} /> Canlı Durumu Yenile
-              </button>
+            <div className="mb-5 text-sm text-slate-300">
+              Şu an işyerlerinde aktif toplam personel:{' '}
+              <span className="font-bold text-emerald-400">{totalActiveCount} kişi</span>
             </div>
 
             {loadingLive ? (
@@ -1030,20 +1025,12 @@ export default function AdminPage() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={fetchPuantajReport}
-                  className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 border border-slate-700 hover:bg-slate-700 rounded-lg text-sm"
-                >
-                  <RefreshCw className={`w-4 h-4 ${loadingReport ? 'animate-spin' : ''}`} /> Yenile
-                </button>
-                <button
-                  onClick={exportPuantajCSV}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium"
-                >
-                  <Download className="w-4 h-4" /> Puantajı Excel İndir
-                </button>
-              </div>
+              <button
+                onClick={exportPuantajCSV}
+                className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium"
+              >
+                <Download className="w-4 h-4" /> Puantajı Excel İndir
+              </button>
             </div>
 
             {monthlySummaries.length > 0 && (
@@ -1181,22 +1168,6 @@ export default function AdminPage() {
         {/* SEKME 3: İZİN & TALEPLER YÖNETİMİ */}
         {activeTab === 'leaves' && (
           <div className="space-y-6">
-            {/* Üst Bilgi & Yenileme Barı */}
-            <div className="flex items-center justify-between">
-              <p className="text-sm text-slate-300">
-                Personel izin taleplerini gerekçeli olarak onaylayın veya reddedin.
-              </p>
-              <button
-                onClick={() => {
-                  fetchLeaveRequests();
-                  fetchLeaves();
-                }}
-                className="flex items-center gap-1.5 px-3 py-2 bg-slate-900 border border-slate-800 hover:bg-slate-800 rounded-lg text-xs font-medium"
-              >
-                <RefreshCw className="w-3.5 h-3.5" /> Talepleri Yenile
-              </button>
-            </div>
-
             {/* Personellerden Gelen Bekleyen İzin Talepleri */}
             {pendingRequests.length > 0 && (
               <div className="bg-rose-950/20 border border-rose-500/40 rounded-2xl p-5">
@@ -1320,7 +1291,6 @@ export default function AdminPage() {
 
               {/* Sağ Kolon: Karara Bağlanan Talepler Geçmişi & Puantaj İzinleri */}
               <div className="lg:col-span-2 space-y-6">
-                {/* Sonuçlandırılmış Talepler (Onay/Red Gerekçeleri) */}
                 {reviewedRequests.length > 0 && (
                   <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
                     <div className="p-4 border-b border-slate-800 flex items-center gap-2">
@@ -1370,7 +1340,6 @@ export default function AdminPage() {
                   </div>
                 )}
 
-                {/* Puantaja İşlenen İzin Günleri */}
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
                   <div className="p-4 border-b border-slate-800">
                     <h2 className="font-semibold text-sm">Puantaja İşlenen İzin Günleri</h2>
@@ -1428,14 +1397,8 @@ export default function AdminPage() {
         {activeTab === 'locations' && (
           <div className="space-y-6">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-              <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+              <div className="p-4 border-b border-slate-800">
                 <h2 className="font-semibold text-sm">Şube Koordinatları, Mesai / Mola Hakları ve QR Kodları</h2>
-                <button
-                  onClick={fetchLocationsList}
-                  className="text-xs text-slate-400 hover:text-white flex items-center gap-1"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" /> Yenile
-                </button>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
@@ -1738,14 +1701,8 @@ export default function AdminPage() {
             </div>
 
             <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-              <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+              <div className="p-4 border-b border-slate-800">
                 <h2 className="font-semibold text-sm">Kayıtlı Kullanıcılar & Özel Çalışma Saatleri</h2>
-                <button
-                  onClick={fetchStaff}
-                  className="text-xs text-slate-400 hover:text-white flex items-center gap-1"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" /> Yenile
-                </button>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
@@ -1832,6 +1789,37 @@ export default function AdminPage() {
           </div>
         )}
       </div>
+
+      {/* ÇIKIŞ YAPMA ONAY MODALI */}
+      {showLogoutConfirm && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-sm w-full shadow-2xl text-center">
+            <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center text-red-400">
+              <LogOut className="w-6 h-6" />
+            </div>
+            <h3 className="text-lg font-bold text-white mb-1">Çıkış Yapılsın mı?</h3>
+            <p className="text-xs text-slate-400 mb-6">
+              Yönetici oturumunuz sonlandırılacak ve giriş ekranına yönlendirileceksiniz. Emin misiniz?
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setShowLogoutConfirm(false)}
+                className="py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-slate-300 transition"
+              >
+                Vazgeç
+              </button>
+              <button
+                type="button"
+                onClick={confirmLogout}
+                className="py-2.5 bg-red-600 hover:bg-red-500 rounded-xl text-xs font-semibold text-white transition"
+              >
+                Evet, Çıkış Yap
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* TALEP ONAY / GEREKÇELİ RED KARAR MODALI */}
       {decisionModal && (
