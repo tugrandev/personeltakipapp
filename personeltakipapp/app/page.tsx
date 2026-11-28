@@ -21,6 +21,7 @@ import {
   Send,
   Coffee,
   Play,
+  RefreshCw,
 } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 
@@ -30,6 +31,7 @@ interface LeaveRequest {
   start_date: string;
   end_date: string;
   reason: string;
+  admin_note?: string | null;
   status: 'pending' | 'approved' | 'rejected';
   created_at: string;
 }
@@ -58,6 +60,7 @@ export default function HomePage() {
 
   // İzin Talebi State
   const [leaves, setLeaves] = useState<LeaveRequest[]>([]);
+  const [refreshingLeaves, setRefreshingLeaves] = useState(false);
   const [leaveType, setLeaveType] = useState('Yıllık İzin');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -283,6 +286,7 @@ export default function HomePage() {
   };
 
   const fetchLeaves = async (userId: string) => {
+    setRefreshingLeaves(true);
     const { data } = await supabase
       .from('leave_requests')
       .select('*')
@@ -292,6 +296,7 @@ export default function HomePage() {
     if (data) {
       setLeaves(data as LeaveRequest[]);
     }
+    setTimeout(() => setRefreshingLeaves(false), 300);
   };
 
   const handleLeaveSubmit = async (e: React.FormEvent) => {
@@ -747,11 +752,22 @@ export default function HomePage() {
               </form>
             </div>
 
-            {/* Geçmiş İzin Talepleri */}
+            {/* Geçmiş İzin Talepleri & Yönetici Yanıtları */}
             <div>
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">
-                Geçmiş Taleplerim
-              </h3>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Geçmiş Taleplerim
+                </h3>
+                <button
+                  onClick={() => fetchLeaves(user.id)}
+                  disabled={refreshingLeaves}
+                  className="inline-flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300"
+                >
+                  <RefreshCw className={`w-3 h-3 ${refreshingLeaves ? 'animate-spin' : ''}`} />
+                  Durumu Güncelle
+                </button>
+              </div>
+
               <div className="space-y-2.5">
                 {leaves.length === 0 ? (
                   <div className="text-center py-6 bg-slate-900/40 rounded-2xl border border-slate-800/60">
@@ -761,35 +777,49 @@ export default function HomePage() {
                   leaves.map((item) => (
                     <div
                       key={item.id}
-                      className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl flex items-center justify-between"
+                      className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl space-y-2"
                     >
-                      <div>
-                        <p className="text-sm font-semibold text-white">{item.leave_type}</p>
-                        <p className="text-xs text-slate-400 mt-0.5">
-                          {new Date(item.start_date).toLocaleDateString('tr-TR')} –{' '}
-                          {new Date(item.end_date).toLocaleDateString('tr-TR')}
-                        </p>
-                        {item.reason && (
-                          <p className="text-[11px] text-slate-500 mt-1 line-clamp-1">{item.reason}</p>
-                        )}
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-semibold text-white">{item.leave_type}</p>
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            {new Date(item.start_date).toLocaleDateString('tr-TR')} –{' '}
+                            {new Date(item.end_date).toLocaleDateString('tr-TR')}
+                          </p>
+                          {item.reason && (
+                            <p className="text-[11px] text-slate-500 mt-1">Notunuz: {item.reason}</p>
+                          )}
+                        </div>
+                        <div className="shrink-0">
+                          {item.status === 'approved' && (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                              <CheckCircle2 className="w-3 h-3" /> Onaylandı
+                            </span>
+                          )}
+                          {item.status === 'rejected' && (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-red-500/15 text-red-400 border border-red-500/30">
+                              <XCircle className="w-3 h-3" /> Reddedildi
+                            </span>
+                          )}
+                          {item.status === 'pending' && (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                              <Hourglass className="w-3 h-3" /> Bekliyor
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <div>
-                        {item.status === 'approved' && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                            <CheckCircle2 className="w-3 h-3" /> Onaylandı
-                          </span>
-                        )}
-                        {item.status === 'rejected' && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-red-500/15 text-red-400 border border-red-500/30">
-                            <XCircle className="w-3 h-3" /> Reddedildi
-                          </span>
-                        )}
-                        {item.status === 'pending' && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
-                            <Hourglass className="w-3 h-3" /> Bekliyor
-                          </span>
-                        )}
-                      </div>
+
+                      {item.admin_note && (
+                        <div
+                          className={`text-[11px] px-3 py-2 rounded-lg border leading-relaxed ${
+                            item.status === 'rejected'
+                              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+                              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                          }`}
+                        >
+                          <strong>Yönetici Yanıtı:</strong> {item.admin_note}
+                        </div>
+                      )}
                     </div>
                   ))
                 )}

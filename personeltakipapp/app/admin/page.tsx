@@ -31,6 +31,8 @@ import {
   Coffee,
   Check,
   XCircle,
+  MessageSquareWarning,
+  History,
 } from 'lucide-react';
 
 interface ActiveWorker {
@@ -77,9 +79,17 @@ interface MonthlyUserSummary {
   leaveDays: number;
 }
 
+const QUICK_REJECTION_REASONS = [
+  'Operasyonel yoğunluk nedeniyle bu tarihlerde izin uygun değildir.',
+  'Aynı tarihlerde departmanda başka personel izinlidir.',
+  'Tarih aralığını güncelleyerek tekrar talep oluşturunuz.',
+  'Eksik bilgi veya rapor belgesi nedeniyle onaylanamadı.',
+];
+
 export default function AdminPage() {
   const [adminUser, setAdminUser] = useState<AppUser | null>(null);
   const [activeTab, setActiveTab] = useState<'live' | 'report' | 'leaves' | 'locations' | 'staff'>('live');
+  const [isRefreshingAll, setIsRefreshingAll] = useState(false);
   const router = useRouter();
 
   // Canlı durum
@@ -97,10 +107,19 @@ export default function AdminPage() {
   // İzin yönetimi & Personel Talepleri
   const [leavesList, setLeavesList] = useState<any[]>([]);
   const [pendingRequests, setPendingRequests] = useState<any[]>([]);
+  const [reviewedRequests, setReviewedRequests] = useState<any[]>([]);
   const [leaveUserId, setLeaveUserId] = useState('');
   const [leaveDate, setLeaveDate] = useState('');
   const [leaveType, setLeaveType] = useState('Yıllık İzin');
   const [leaveNote, setLeaveNote] = useState('');
+
+  // Talep Karar Modalı (Onay / Gerekçeli Red)
+  const [decisionModal, setDecisionModal] = useState<{
+    req: any;
+    decision: 'approved' | 'rejected';
+  } | null>(null);
+  const [decisionReason, setDecisionReason] = useState('');
+  const [submittingDecision, setSubmittingDecision] = useState(false);
 
   // Şube yönetimi & QR Modal
   const [locationsList, setLocationsList] = useState<any[]>([]);
@@ -144,7 +163,7 @@ export default function AdminPage() {
     fetchLocationsList();
     fetchStaff();
     fetchLeaves();
-    fetchPendingLeaveRequests();
+    fetchLeaveRequests();
   }, []);
 
   useEffect(() => {
@@ -152,6 +171,26 @@ export default function AdminPage() {
       fetchPuantajReport();
     }
   }, [activeTab, startDate, endDate, selectedLocFilter]);
+
+  // Bulunulan aktif sekmeye göre tüm verileri yenileyen merkezi fonksiyon
+  const handleRefreshActiveTab = async () => {
+    setIsRefreshingAll(true);
+    try {
+      if (activeTab === 'live') {
+        await fetchLiveLocations();
+      } else if (activeTab === 'report') {
+        await fetchPuantajReport();
+      } else if (activeTab === 'leaves') {
+        await Promise.all([fetchLeaveRequests(), fetchLeaves()]);
+      } else if (activeTab === 'locations') {
+        await fetchLocationsList();
+      } else if (activeTab === 'staff') {
+        await fetchStaff();
+      }
+    } finally {
+      setTimeout(() => setIsRefreshingAll(false), 300);
+    }
+  };
 
   const timeToMinutes = (hhmm?: string | null): number | null => {
     if (!hhmm || !hhmm.includes(':')) return null;
@@ -170,7 +209,7 @@ export default function AdminPage() {
     return `${h} sa ${m} dk`;
   };
 
-  // 1. CANLI DURUM (Molada olanları da gösterir)
+  // 1. CANLI DURUM
   const fetchLiveLocations = async () => {
     setLoadingLive(true);
     const { data: locations } = await supabase.from('locations').select('id, name').order('name');
@@ -241,7 +280,7 @@ export default function AdminPage() {
     fetchLiveLocations();
   };
 
-  // 2. PUANTAJ & GEÇ KALMA / MOLA / FAZLA MESAİ / AYLIK ÖZET
+  // 2. PUANTAJ & RAPOR
   const fetchPuantajReport = async () => {
     setLoadingReport(true);
     const startISO = new Date(`${startDate}T00:00:00`).toISOString();
@@ -522,48 +561,78 @@ export default function AdminPage() {
     if (data) setLeavesList(data);
   };
 
-  const fetchPendingLeaveRequests = async () => {
+  const fetchLeaveRequests = async () => {
     const { data } = await supabase
       .from('leave_requests')
       .select('*, profiles(full_name, username)')
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false });
-    if (data) setPendingRequests(data);
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (data) {
+      setPendingRequests(data.filter((r: any) => r.status === 'pending'));
+      setReviewedRequests(data.filter((r: any) => r.status !== 'pending'));
+    }
   };
 
-  const handleLeaveRequestAction = async (req: any, decision: 'approved' | 'rejected') => {
-    const { error } = await supabase
-      .from('leave_requests')
-      .update({ status: decision })
-      .eq('id', req.id);
+  const openDecisionModal = (req: any, decision: 'approved' | 'rejected') => {
+    setDecisionReason('');
+    setDecisionModal({ req, decision });
+  };
 
-    if (error) {
-      alert('İşlem sırasında hata oluştu.');
+  const submitLeaveDecision = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!decisionModal || submittingDecision) return;
+
+    const { req, decision } = decisionModal;
+    const trimmedNote = decisionReason.trim();
+
+    if (decision === 'rejected' && trimmedNote.length < 3) {
+      alert('Reddetme işlemi için lütfen personele iletilecek geçerli bir gerekçe yazın.');
       return;
     }
 
-    // Onaylandıysa başlangıç-bitiş arasındaki günleri otomatik puantaj izin tablosuna (leaves) ekle
-    if (decision === 'approved') {
-      const start = new Date(req.start_date);
-      const end = new Date(req.end_date);
-      const rowsToInsert: any[] = [];
+    setSubmittingDecision(true);
 
-      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-        rowsToInsert.push({
-          user_id: req.user_id,
-          leave_date: d.toISOString().slice(0, 10),
-          leave_type: req.leave_type,
-          note: req.reason || 'Personel talebiyle onaylandı',
-        });
+    try {
+      const { error } = await supabase
+        .from('leave_requests')
+        .update({
+          status: decision,
+          admin_note: trimmedNote || null,
+          reviewed_at: new Date().toISOString(),
+        })
+        .eq('id', req.id);
+
+      if (error) throw error;
+
+      // Onaylandıysa başlangıç-bitiş günlerini otomatik puantaj izin tablosuna işle
+      if (decision === 'approved') {
+        const start = new Date(req.start_date);
+        const end = new Date(req.end_date);
+        const rowsToInsert: any[] = [];
+
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+          rowsToInsert.push({
+            user_id: req.user_id,
+            leave_date: d.toISOString().slice(0, 10),
+            leave_type: req.leave_type,
+            note: trimmedNote || req.reason || 'Personel talebiyle onaylandı',
+          });
+        }
+
+        if (rowsToInsert.length > 0) {
+          await supabase.from('leaves').insert(rowsToInsert);
+        }
       }
 
-      if (rowsToInsert.length > 0) {
-        await supabase.from('leaves').insert(rowsToInsert);
-      }
+      setDecisionModal(null);
+      setDecisionReason('');
+      await Promise.all([fetchLeaveRequests(), fetchLeaves()]);
+    } catch (err: any) {
+      alert('İşlem sırasında hata oluştu: ' + (err.message || 'Bilinmeyen hata'));
+    } finally {
+      setSubmittingDecision(false);
     }
-
-    fetchPendingLeaveRequests();
-    fetchLeaves();
   };
 
   const handleAddLeave = async (e: React.FormEvent) => {
@@ -588,7 +657,7 @@ export default function AdminPage() {
     fetchLeaves();
   };
 
-  // 4. ŞUBE YÖNETİMİ, MESAİ & MOLA HAKKI
+  // 4. ŞUBE YÖNETİMİ
   const fetchLocationsList = async () => {
     const { data } = await supabase.from('locations').select('*').order('name');
     if (data) setLocationsList(data);
@@ -777,7 +846,7 @@ export default function AdminPage() {
                   activeTab === 'leaves' ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-white'
                 }`}
               >
-                <FileCheck2 className="w-4 h-4" /> İzin & Rapor
+                <FileCheck2 className="w-4 h-4" /> İzin & Talepler
                 {pendingRequests.length > 0 && (
                   <span className="ml-1 px-1.5 py-0.2 bg-white text-rose-600 text-[10px] font-extrabold rounded-full">
                     {pendingRequests.length}
@@ -802,12 +871,23 @@ export default function AdminPage() {
               </button>
             </div>
 
+            {/* Merkezi Sekme Yenileme Butonu */}
+            <button
+              onClick={handleRefreshActiveTab}
+              disabled={isRefreshingAll}
+              className="flex items-center gap-1.5 px-3 py-2.5 bg-slate-900 border border-slate-800 hover:bg-slate-800 rounded-xl text-xs font-medium text-emerald-400 transition"
+              title="Aktif Sayfayı Yenile"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRefreshingAll ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">Yenile</span>
+            </button>
+
             <button
               onClick={() => {
                 clearSessionUser();
                 window.location.href = '/login';
               }}
-              className="p-2.5 bg-slate-900 border border-slate-800 rounded-xl text-slate-400 hover:text-white"
+              className="p-2.5 bg-slate-900 border border-slate-800 rounded-xl text-slate-400 hover:text-red-400 transition"
               title="Çıkış Yap"
             >
               <LogOut className="w-4 h-4" />
@@ -827,7 +907,7 @@ export default function AdminPage() {
                 onClick={fetchLiveLocations}
                 className="flex items-center gap-1.5 px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm hover:bg-slate-800"
               >
-                <RefreshCw className="w-4 h-4" /> Yenile
+                <RefreshCw className={`w-4 h-4 ${loadingLive ? 'animate-spin' : ''}`} /> Canlı Durumu Yenile
               </button>
             </div>
 
@@ -955,7 +1035,7 @@ export default function AdminPage() {
                   onClick={fetchPuantajReport}
                   className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 border border-slate-700 hover:bg-slate-700 rounded-lg text-sm"
                 >
-                  <RefreshCw className="w-4 h-4" /> Yenile
+                  <RefreshCw className={`w-4 h-4 ${loadingReport ? 'animate-spin' : ''}`} /> Yenile
                 </button>
                 <button
                   onClick={exportPuantajCSV}
@@ -1098,14 +1178,30 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* SEKME 3: İZİN & RAPOR YÖNETİMİ */}
+        {/* SEKME 3: İZİN & TALEPLER YÖNETİMİ */}
         {activeTab === 'leaves' && (
           <div className="space-y-6">
+            {/* Üst Bilgi & Yenileme Barı */}
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-slate-300">
+                Personel izin taleplerini gerekçeli olarak onaylayın veya reddedin.
+              </p>
+              <button
+                onClick={() => {
+                  fetchLeaveRequests();
+                  fetchLeaves();
+                }}
+                className="flex items-center gap-1.5 px-3 py-2 bg-slate-900 border border-slate-800 hover:bg-slate-800 rounded-lg text-xs font-medium"
+              >
+                <RefreshCw className="w-3.5 h-3.5" /> Talepleri Yenile
+              </button>
+            </div>
+
             {/* Personellerden Gelen Bekleyen İzin Talepleri */}
             {pendingRequests.length > 0 && (
               <div className="bg-rose-950/20 border border-rose-500/40 rounded-2xl p-5">
                 <h2 className="text-sm font-bold text-rose-300 mb-3 flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4" /> Personellerden Gelen Onay Bekleyen İzin Talepleri ({pendingRequests.length})
+                  <AlertCircle className="w-4 h-4" /> Onay Bekleyen İzin Talepleri ({pendingRequests.length})
                 </h2>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                   {pendingRequests.map((req) => {
@@ -1130,19 +1226,21 @@ export default function AdminPage() {
                             </span>
                           </p>
                           {req.reason && (
-                            <p className="text-xs text-slate-400 mt-1 italic">"{req.reason}"</p>
+                            <p className="text-xs text-slate-400 mt-1.5 bg-slate-950/60 p-2 rounded-lg border border-slate-800/80">
+                              <span className="text-slate-500">Personel Notu:</span> "{req.reason}"
+                            </p>
                           )}
                         </div>
                         <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800">
                           <button
-                            onClick={() => handleLeaveRequestAction(req, 'approved')}
-                            className="py-1.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-xs font-semibold flex items-center justify-center gap-1"
+                            onClick={() => openDecisionModal(req, 'approved')}
+                            className="py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 transition"
                           >
                             <Check className="w-3.5 h-3.5" /> Onayla
                           </button>
                           <button
-                            onClick={() => handleLeaveRequestAction(req, 'rejected')}
-                            className="py-1.5 bg-red-600/20 hover:bg-red-600/40 text-red-300 border border-red-500/30 rounded-lg text-xs font-semibold flex items-center justify-center gap-1"
+                            onClick={() => openDecisionModal(req, 'rejected')}
+                            className="py-2 bg-red-600/20 hover:bg-red-600/35 text-red-300 border border-red-500/30 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 transition"
                           >
                             <XCircle className="w-3.5 h-3.5" /> Reddet
                           </button>
@@ -1155,6 +1253,7 @@ export default function AdminPage() {
             )}
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Manuel İzin Ekleme Formu */}
               <form
                 onSubmit={handleAddLeave}
                 className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 h-fit"
@@ -1219,52 +1318,106 @@ export default function AdminPage() {
                 </button>
               </form>
 
-              <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-                <div className="p-4 border-b border-slate-800">
-                  <h2 className="font-semibold text-sm">Kayıtlı ve Onaylanmış İzinler</h2>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-sm">
-                    <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase">
-                      <tr>
-                        <th className="px-4 py-3">Tarih</th>
-                        <th className="px-4 py-3">Personel</th>
-                        <th className="px-4 py-3">İzin Türü</th>
-                        <th className="px-4 py-3">Not</th>
-                        <th className="px-4 py-3 text-right">Sil</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800">
-                      {leavesList.length === 0 ? (
+              {/* Sağ Kolon: Karara Bağlanan Talepler Geçmişi & Puantaj İzinleri */}
+              <div className="lg:col-span-2 space-y-6">
+                {/* Sonuçlandırılmış Talepler (Onay/Red Gerekçeleri) */}
+                {reviewedRequests.length > 0 && (
+                  <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+                    <div className="p-4 border-b border-slate-800 flex items-center gap-2">
+                      <History className="w-4 h-4 text-slate-400" />
+                      <h2 className="font-semibold text-sm">Sonuçlandırılan İzin Talepleri</h2>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-sm">
+                        <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase">
+                          <tr>
+                            <th className="px-4 py-3">Personel</th>
+                            <th className="px-4 py-3">Tarih Aralığı</th>
+                            <th className="px-4 py-3">Durum</th>
+                            <th className="px-4 py-3">Yönetici Açıklaması / Gerekçe</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800">
+                          {reviewedRequests.slice(0, 15).map((r) => {
+                            const prof = Array.isArray(r.profiles) ? r.profiles[0] : r.profiles;
+                            return (
+                              <tr key={r.id}>
+                                <td className="px-4 py-3 font-medium">{prof?.full_name || 'Personel'}</td>
+                                <td className="px-4 py-3 text-xs text-slate-300">
+                                  {new Date(r.start_date).toLocaleDateString('tr-TR')} –{' '}
+                                  {new Date(r.end_date).toLocaleDateString('tr-TR')}
+                                </td>
+                                <td className="px-4 py-3">
+                                  {r.status === 'approved' ? (
+                                    <span className="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-300 font-semibold">
+                                      Onaylandı
+                                    </span>
+                                  ) : (
+                                    <span className="px-2 py-0.5 rounded text-xs bg-red-500/20 text-red-300 font-semibold">
+                                      Reddedildi
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-4 py-3 text-xs text-slate-300">
+                                  {r.admin_note || <span className="text-slate-500">-</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Puantaja İşlenen İzin Günleri */}
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+                  <div className="p-4 border-b border-slate-800">
+                    <h2 className="font-semibold text-sm">Puantaja İşlenen İzin Günleri</h2>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-slate-800/60 text-slate-400 text-xs uppercase">
                         <tr>
-                          <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
-                            Henüz izin kaydı girilmemiş.
-                          </td>
+                          <th className="px-4 py-3">Tarih</th>
+                          <th className="px-4 py-3">Personel</th>
+                          <th className="px-4 py-3">İzin Türü</th>
+                          <th className="px-4 py-3">Not</th>
+                          <th className="px-4 py-3 text-right">Sil</th>
                         </tr>
-                      ) : (
-                        leavesList.map((lv) => (
-                          <tr key={lv.id}>
-                            <td className="px-4 py-3">{new Date(lv.leave_date).toLocaleDateString('tr-TR')}</td>
-                            <td className="px-4 py-3 font-medium">{lv.profiles?.full_name}</td>
-                            <td className="px-4 py-3">
-                              <span className="px-2 py-0.5 rounded text-xs bg-rose-500/20 text-rose-300 font-semibold">
-                                {lv.leave_type}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 text-slate-400 text-xs">{lv.note || '-'}</td>
-                            <td className="px-4 py-3 text-right">
-                              <button
-                                onClick={() => deleteLeave(lv.id)}
-                                className="text-slate-400 hover:text-red-400"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800">
+                        {leavesList.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                              Henüz izin kaydı girilmemiş.
                             </td>
                           </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
+                        ) : (
+                          leavesList.map((lv) => (
+                            <tr key={lv.id}>
+                              <td className="px-4 py-3">{new Date(lv.leave_date).toLocaleDateString('tr-TR')}</td>
+                              <td className="px-4 py-3 font-medium">{lv.profiles?.full_name}</td>
+                              <td className="px-4 py-3">
+                                <span className="px-2 py-0.5 rounded text-xs bg-rose-500/20 text-rose-300 font-semibold">
+                                  {lv.leave_type}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 text-slate-400 text-xs">{lv.note || '-'}</td>
+                              <td className="px-4 py-3 text-right">
+                                <button
+                                  onClick={() => deleteLeave(lv.id)}
+                                  className="text-slate-400 hover:text-red-400"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1275,8 +1428,14 @@ export default function AdminPage() {
         {activeTab === 'locations' && (
           <div className="space-y-6">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-              <div className="p-4 border-b border-slate-800">
+              <div className="p-4 border-b border-slate-800 flex items-center justify-between">
                 <h2 className="font-semibold text-sm">Şube Koordinatları, Mesai / Mola Hakları ve QR Kodları</h2>
+                <button
+                  onClick={fetchLocationsList}
+                  className="text-xs text-slate-400 hover:text-white flex items-center gap-1"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Yenile
+                </button>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
@@ -1673,6 +1832,118 @@ export default function AdminPage() {
           </div>
         )}
       </div>
+
+      {/* TALEP ONAY / GEREKÇELİ RED KARAR MODALI */}
+      {decisionModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-md w-full shadow-2xl">
+            <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <MessageSquareWarning
+                  className={`w-5 h-5 ${
+                    decisionModal.decision === 'rejected' ? 'text-red-400' : 'text-emerald-400'
+                  }`}
+                />
+                <h3 className="font-bold text-base text-white">
+                  {decisionModal.decision === 'rejected'
+                    ? 'İzin Talebini Reddet'
+                    : 'İzin Talebini Onayla'}
+                </h3>
+              </div>
+              <button
+                onClick={() => setDecisionModal(null)}
+                className="p-1 text-slate-400 hover:text-white rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-slate-950/70 border border-slate-800/80 rounded-xl p-3.5 mb-4 text-xs space-y-1">
+              <p className="text-slate-300">
+                <span className="text-slate-500">Personel:</span>{' '}
+                <strong className="text-white">
+                  {(Array.isArray(decisionModal.req.profiles)
+                    ? decisionModal.req.profiles[0]?.full_name
+                    : decisionModal.req.profiles?.full_name) || 'Personel'}
+                </strong>
+              </p>
+              <p className="text-slate-300">
+                <span className="text-slate-500">Talep:</span> {decisionModal.req.leave_type} (
+                {new Date(decisionModal.req.start_date).toLocaleDateString('tr-TR')} –{' '}
+                {new Date(decisionModal.req.end_date).toLocaleDateString('tr-TR')})
+              </p>
+              {decisionModal.req.reason && (
+                <p className="text-slate-400 italic pt-1">"{decisionModal.req.reason}"</p>
+              )}
+            </div>
+
+            <form onSubmit={submitLeaveDecision} className="space-y-4">
+              {decisionModal.decision === 'rejected' && (
+                <div>
+                  <p className="text-[11px] text-slate-400 mb-2">Hızlı Gerekçe Seçin:</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {QUICK_REJECTION_REASONS.map((txt, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => setDecisionReason(txt)}
+                        className="text-left text-[11px] px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-200 transition"
+                      >
+                        {txt}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  {decisionModal.decision === 'rejected'
+                    ? 'Red Gerekçesi (Personele iletilecek - Zorunlu)'
+                    : 'Yönetici Notu (Personele iletilecek - İsteğe bağlı)'}
+                </label>
+                <textarea
+                  rows={3}
+                  required={decisionModal.decision === 'rejected'}
+                  value={decisionReason}
+                  onChange={(e) => setDecisionReason(e.target.value)}
+                  placeholder={
+                    decisionModal.decision === 'rejected'
+                      ? 'Örn: Bu tarihlerde vardiyada eksik personel kalacağı için onaylanamamıştır.'
+                      : 'Örn: İyi tatiller dileriz.'
+                  }
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setDecisionModal(null)}
+                  className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-slate-300"
+                >
+                  Vazgeç
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingDecision}
+                  className={`px-5 py-2.5 rounded-xl text-xs font-semibold text-white transition disabled:opacity-50 ${
+                    decisionModal.decision === 'rejected'
+                      ? 'bg-red-600 hover:bg-red-500'
+                      : 'bg-emerald-600 hover:bg-emerald-500'
+                  }`}
+                >
+                  {submittingDecision
+                    ? 'Kaydediliyor...'
+                    : decisionModal.decision === 'rejected'
+                    ? 'Reddet ve Bildir'
+                    : 'Onayla ve Puantaja İşle'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* ŞUBE QR KOD YAZDIRMA MODALI */}
       {qrModalLoc && (
