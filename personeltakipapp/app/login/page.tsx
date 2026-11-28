@@ -3,11 +3,10 @@
 import { useState, Suspense } from 'react';
 import { supabase } from '@/lib/supabase';
 import { setSessionUser } from '@/lib/session';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { QrCode } from 'lucide-react';
 
 function LoginForm() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const redirectParam = searchParams.get('redirect');
 
@@ -27,53 +26,67 @@ function LoginForm() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
+
     setLoading(true);
     setError('');
 
-    const { data: users, error: rpcError } = await supabase.rpc('verify_user_login', {
-      p_username: username,
-      p_password: password,
-    });
+    try {
+      const { data: users, error: rpcError } = await supabase.rpc('verify_user_login', {
+        p_username: username.trim(),
+        p_password: password,
+      });
 
-    const profile = users && users.length > 0 ? users[0] : null;
+      const profile = users && users.length > 0 ? users[0] : null;
 
-    if (rpcError || !profile) {
-      setError('Kullanıcı adı veya parola hatalı.');
-      setLoading(false);
-      return;
-    }
-
-    // Personel hesapları için cihaz kilidi kontrolü (Admin sınırsız cihazdan girebilir)
-    const currentDeviceId = getOrCreateDeviceId();
-    if (profile.role !== 'admin') {
-      if (!profile.device_id) {
-        await supabase
-          .from('profiles')
-          .update({ device_id: currentDeviceId })
-          .eq('id', profile.id);
-        profile.device_id = currentDeviceId;
-      } else if (profile.device_id !== currentDeviceId) {
-        setError('Bu hesap başka bir telefona tanımlı! Yönetici ile iletişime geçin.');
+      if (rpcError || !profile) {
+        setError('Kullanıcı adı veya parola hatalı.');
         setLoading(false);
         return;
       }
-    }
 
-    setSessionUser({
-      id: profile.id,
-      full_name: profile.full_name,
-      username: profile.username,
-      role: profile.role,
-      device_id: profile.device_id,
-    });
+      // Personel hesapları için cihaz kilidi kontrolü (Admin sınırsız cihazdan girebilir)
+      const currentDeviceId = getOrCreateDeviceId();
+      if (profile.role !== 'admin') {
+        if (!profile.device_id) {
+          const { error: updateError } = await supabase
+            .from('profiles')
+            .update({ device_id: currentDeviceId })
+            .eq('id', profile.id);
 
-    // Kullanıcının rolüne göre otomatik yönlendirme
-    if (profile.role === 'admin') {
-      router.push('/admin');
-    } else if (redirectParam) {
-      router.push(redirectParam);
-    } else {
-      router.push('/');
+          if (updateError) {
+            setError('Cihaz kaydı yapılırken hata oluştu. Tekrar deneyin.');
+            setLoading(false);
+            return;
+          }
+          profile.device_id = currentDeviceId;
+        } else if (profile.device_id !== currentDeviceId) {
+          setError('Bu hesap başka bir telefona tanımlı! Yönetici ile iletişime geçin.');
+          setLoading(false);
+          return;
+        }
+      }
+
+      setSessionUser({
+        id: profile.id,
+        full_name: profile.full_name,
+        username: profile.username,
+        role: profile.role,
+        device_id: profile.device_id,
+      });
+
+      // PWA modunda yönlendirmenin takılmaması için tam sayfa yönlendirmesi
+      if (profile.role === 'admin') {
+        window.location.href = '/admin';
+      } else if (redirectParam) {
+        window.location.href = redirectParam;
+      } else {
+        window.location.href = '/';
+      }
+    } catch (err) {
+      console.error('Login error:', err);
+      setError('Bağlantı hatası oluştu, lütfen tekrar deneyin.');
+      setLoading(false);
     }
   };
 

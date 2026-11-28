@@ -20,11 +20,11 @@ export default function HomePage() {
   useEffect(() => {
     const currentUser = getSessionUser();
     if (!currentUser) {
-      router.push('/login');
+      window.location.href = '/login';
       return;
     }
     if (currentUser.role === 'admin') {
-      router.push('/admin');
+      window.location.href = '/admin';
       return;
     }
 
@@ -134,10 +134,10 @@ export default function HomePage() {
     setScannerOpen(false);
   };
 
-  const handleLogout = () => {
-    stopScanner();
+  const handleLogout = async () => {
+    await stopScanner();
     clearSessionUser();
-    router.push('/login');
+    window.location.href = '/login';
   };
 
   if (!user) return null;
